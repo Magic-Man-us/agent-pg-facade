@@ -16,6 +16,20 @@ This guide describes the reference single-host deployment: Ubuntu 24.04, Postgre
 
 The `pgfacade` OS account has no login shell. systemd supplies API keys through `LoadCredential`. The service cannot modify its code, read home directories, or read the host key file or backup private key. PostgreSQL accepts Unix-socket peer authentication only. The connector can connect only to the `pgfacade` database and switch only to its reader and writer roles.
 
+## Adapt it to another host
+
+Host-specific values are named constants at the top of each file. Change them there:
+
+| File | Constants |
+|---|---|
+| [update](update) | `APP_ROOT`, `UNIT_PATH`, `SYSTEM_PYTHON`, `API_PORT` |
+| [check-host](check-host) | `APP_ROOT`, `BACKUP_DIRECTORY`, `API_PORT`, `SYSTEM_PYTHON`, `POSTGRES_UNIT`, `DATABASE`, `DATABASE_DIRECTORY` |
+| [test](test) | `SYSTEM_PYTHON`, `SOCKET_DIRECTORY` |
+| [pgfacade-backup](pgfacade-backup) | `BACKUP_DIRECTORY`, `PUBLIC_CERTIFICATE`, `RETAINED_DAYS`, `SOCKET_DIRECTORY`, `DATABASE` |
+| [check-service.py](check-service.py) | `BASE_URL`, `KEY_FILE` |
+
+The unit files state the same values literally: the PostgreSQL unit name in `After=`, `Requires=`, and `PartOf=`, and the install path and port in `ExecStart=` of [pgfacade.service](pgfacade.service). The role and database names in [provision.sql](provision.sql) and in the policy query of `check-host` are `pgfacade`, `pgfacade_owner`, `pgfacade_reader`, and `pgfacade_writer`.
+
 ## Check the installation
 
 From the checkout:

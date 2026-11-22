@@ -6,6 +6,7 @@ readonly APP_ROOT=/opt/pgfacade
 readonly UNIT_PATH=/etc/systemd/system/pgfacade.service
 readonly LOCK_DIRECTORY=/run/pgfacade-deploy
 readonly SYSTEM_PYTHON=/usr/bin/python3.12
+readonly API_PORT=8765
 readonly CHECKOUT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
 
 log() {
@@ -156,7 +157,7 @@ sudo -n systemctl daemon-reload
 sudo -n systemctl reset-failed pgfacade.service
 sudo -n systemctl start pgfacade.service
 for attempt in $(seq 1 40); do
-    if curl --noproxy '*' --silent --fail --max-time 2 http://127.0.0.1:8765/healthz >/dev/null; then
+    if curl --noproxy '*' --silent --fail --max-time 2 http://127.0.0.1:$API_PORT/healthz >/dev/null; then
         break
     fi
     sleep 0.25
