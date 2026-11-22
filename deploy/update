@@ -82,7 +82,7 @@ trap 'exit 143' TERM
 
 mkdir "$SNAPSHOT"
 tar --exclude=__pycache__ --exclude='*.pyc' -C "$CHECKOUT" -cf - \
-    src tests pyproject.toml uv.lock README.md docs/access-control.md \
+    src tests pyproject.toml uv.lock README.md LICENSE docs/access-control.md \
     docs/examples/mock-access.yaml docs/examples/mock-access.toml \
     deploy/pgfacade.service deploy/check-service.py deploy/check-host deploy/update deploy/test \
     deploy/pgfacade-backup deploy/pgfacade-backup.service deploy/pgfacade-backup.timer \
