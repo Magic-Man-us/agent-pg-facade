@@ -10,38 +10,40 @@ PGFacade runs as a local MCP server. The assistant gets typed tools such as `pg_
 
 You need [uv](https://docs.astral.sh/uv/) and a PostgreSQL database you can connect to.
 
-1. Generate a key:
+### Claude Code plugin
 
-   ```sh
-   uvx --from git+https://github.com/Magic-Man-us/agent-pg-facade pgfacade keygen
-   ```
+```text
+/plugin install pg-facade --marketplace Magic-Man-us/agent-pg-facade
+```
 
-2. Register the server. For Claude Code, add this to `.mcp.json` in your project, replacing `YOUR_KEY` in both places and the connection string:
+Claude Code asks for the connection string and whether to stay read-only. The plugin adds the `postgres` MCP server and a [skill](plugin/skills/postgres/SKILL.md) that tells the assistant how to query efficiently.
 
-   ```json
-   {
-     "mcpServers": {
-       "postgres": {
-         "command": "uvx",
-         "args": ["--from", "git+https://github.com/Magic-Man-us/agent-pg-facade", "pgfacade", "mcp"],
-         "env": {
-           "PGFACADE_DSN": "postgresql://user@localhost:5432/mydb",
-           "PGFACADE_KEYS": "{\"YOUR_KEY\": {\"name\": \"assistant\"}}",
-           "PGFACADE_MCP_KEY": "YOUR_KEY",
-           "PGFACADE_READ_ONLY": "true"
-         }
-       }
-     }
-   }
-   ```
+### Any MCP client
 
-   Claude Desktop and other MCP clients take the same `command`, `args`, and `env` in their own configuration file.
+Add the server to the client's MCP configuration. For Claude Code that is `.mcp.json` in your project:
 
-3. Ask the assistant something about your data, for example "describe the `orders` table and count rows created this week".
+```json
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/Magic-Man-us/agent-pg-facade", "pgfacade", "mcp"],
+      "env": {
+        "PGFACADE_DSN": "postgresql://user@localhost:5432/mydb",
+        "PGFACADE_READ_ONLY": "true"
+      }
+    }
+  }
+}
+```
 
-`PGFACADE_READ_ONLY=true` exposes 20 read tools and runs every transaction read-only. Remove it to add six write tools, including `pg_rows_insert`, `pg_rows_update`, and `pg_rows_delete`. Raw SQL, schema changes, admin operations, migrations, and notifications stay off until you enable their flag in [Permissions](#permissions).
+Then ask the assistant something about your data, for example "describe the `orders` table and count rows created this week".
 
-The assistant acts as the database user in `PGFACADE_DSN`. To restrict it further, add `"role": "some_role"` to the key's entry, make the database user a member of that role, and grant the role only what the assistant may touch. Run `pgfacade ops` to list every operation and the permission it needs.
+### What the assistant can do
+
+`PGFACADE_READ_ONLY=true` exposes 20 read tools and runs every transaction read-only. Remove it to add six write tools, including `pg_rows_insert`, `pg_rows_update`, and `pg_rows_delete`. Raw SQL, schema changes, admin operations, migrations, and notifications stay off until you enable their flag in [Permissions](#permissions). Run `pgfacade ops` to list every operation and the permission it needs.
+
+A local stdio session needs no API key: it runs as the database user in `PGFACADE_DSN`, so connect as a user that holds only the privileges the assistant should have. The server tells the assistant which tables exist when the session starts (up to 50, with estimated row counts). The REST API and MCP over HTTP always require keys.
 
 ## API contract: version 0.5
 
@@ -65,7 +67,7 @@ HTTP `POST /call` and generated operation routes accept the operation directly. 
 
 ## Permissions
 
-Each API key maps to a `Principal`. Every database operation applies its mapped role with `SET LOCAL ROLE`. Runtime roles must not own tables or inherit the schema-owner role. The server-wide capability flags cap each principal's permissions; all optional capabilities default off. Network server startup requires API keys or explicit group-policy configuration.
+Each API key maps to a `Principal`. Every database operation applies its mapped role with `SET LOCAL ROLE`. Runtime roles must not own tables or inherit the schema-owner role. The server-wide capability flags cap each principal's permissions; all optional capabilities default off. Network server startup requires API keys or explicit group-policy configuration; a local stdio MCP session without keys runs as the connector user.
 
 | Capability | Default | Purpose |
 |---|---|---|

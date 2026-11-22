@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "postgres": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/Magic-Man-us/agent-pg-facade", "pgfacade", "mcp"],
+      "env": {
+        "PGFACADE_DSN": "${user_config.dsn}",
+        "PGFACADE_READ_ONLY": "${user_config.read_only}"
+      }
+    }
+  }
+}
