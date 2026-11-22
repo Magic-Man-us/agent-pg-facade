@@ -1,11 +1,13 @@
-"""CLI: `pgfacade api` (REST), `pgfacade mcp` (MCP over stdio or HTTP), `pgfacade ops`, `pgfacade keygen`."""
+"""CLI: `pgfacade api` (REST), `pgfacade mcp` (MCP over stdio or HTTP), `pgfacade check`, `pgfacade ops`, `pgfacade keygen`."""
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import secrets
 import sys
 
+import psycopg
 from pydantic import ValidationError
 
 from pgfacade.presentation.commands import (
@@ -16,7 +18,41 @@ from pgfacade.presentation.commands import (
     DEFAULT_SERVER_HOST,
 )
 from pgfacade.presentation.enums import CliOperation
-from pgfacade.shared.types import DEFAULT_API_KEY_ENTROPY_BYTES, CommandArguments, McpTransport
+from pgfacade.shared.types import DEFAULT_API_KEY_ENTROPY_BYTES, CommandArguments, McpTransport, PoolTimeoutSeconds
+
+CHECK_TIMEOUT_S: PoolTimeoutSeconds = 10.0
+CHECK_FAILED = 1
+
+
+async def _check() -> int:
+    from pgfacade.configuration.settings import PgSettings
+    from pgfacade.contracts.admin import ServerInfoGet, ServerInfoGetInput
+    from pgfacade.contracts.envelopes import Failure
+    from pgfacade.contracts.schema import TableList, TableListInput
+    from pgfacade.myapp import MyApp
+
+    settings = PgSettings(pool_min=1, pool_max=1, pool_timeout_s=CHECK_TIMEOUT_S)
+    try:
+        # One direct attempt reports the driver's reason at once; the pool would retry and report only a timeout.
+        probe = await psycopg.AsyncConnection.connect(settings.dsn.get_secret_value(), connect_timeout=int(CHECK_TIMEOUT_S))
+        await probe.close()
+        async with MyApp(settings) as app:
+            info = await app.call(ServerInfoGet(input=ServerInfoGetInput()))
+            tables = await app.call(TableList(input=TableListInput()))
+            tools = len(app.allowed_ops())
+    except psycopg.Error as error:
+        sys.stderr.write(f"Could not connect to the database in PGFACADE_DSN: {error}\n")
+        return CHECK_FAILED
+    if isinstance(info.outcome, Failure) or isinstance(tables.outcome, Failure):
+        failed = info if isinstance(info.outcome, Failure) else tables
+        sys.stderr.write(f"Connected, but {failed.kind} failed\n")
+        return CHECK_FAILED
+    server = info.outcome.data
+    sys.stdout.write(f"Connected to {server.database} as {server.user} (PostgreSQL {server.server_version})\n")
+    sys.stdout.write(f"Mode: {'read-only' if settings.read_only else 'read-write'}\n")
+    sys.stdout.write(f"Tables visible: {len(tables.outcome.data.items)}\n")
+    sys.stdout.write(f"Tools exposed: {tools}\n")
+    return 0
 
 
 def main(argv: CommandArguments | None = None) -> None:
@@ -34,6 +70,7 @@ def main(argv: CommandArguments | None = None) -> None:
 
     sub.add_parser(CliOperation.OPS, help="list registered operations")
     sub.add_parser(CliOperation.KEYGEN, help="print a random API key for PGFACADE_KEYS")
+    sub.add_parser(CliOperation.CHECK, help="connect to PGFACADE_DSN and report what an assistant will see")
 
     try:
         command = CLI_COMMAND_ADAPTER.validate_python(parser.parse_args(argv), from_attributes=True)
@@ -42,6 +79,8 @@ def main(argv: CommandArguments | None = None) -> None:
 
     if command.cmd == CliOperation.KEYGEN:
         sys.stdout.write(secrets.token_urlsafe(DEFAULT_API_KEY_ENTROPY_BYTES) + "\n")
+    elif command.cmd == CliOperation.CHECK:
+        sys.exit(asyncio.run(_check()))
     elif command.cmd == CliOperation.OPS:
         from pgfacade.application.registry import REGISTRY
 

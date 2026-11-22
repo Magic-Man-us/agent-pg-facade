@@ -8,19 +8,28 @@ For deployment instructions, see the [deployment guide](deploy/README.md).
 
 PGFacade runs as a local MCP server. The assistant gets typed tools such as `pg_table_describe`, `pg_rows_select`, and `pg_rows_count` instead of a raw SQL connection.
 
-You need [uv](https://docs.astral.sh/uv/) and a PostgreSQL database you can connect to.
+The only prerequisite is [uv](https://docs.astral.sh/uv/getting-started/installation/). Nothing else needs installing: `uvx` fetches and runs PGFacade.
 
-### Claude Code plugin
+### Install
+
+Pick one.
+
+**Claude Code plugin.** Claude Code asks for the connection string and whether to stay read-only. The plugin adds the `postgres` MCP server and a [skill](plugin/skills/postgres/SKILL.md) that tells the assistant how to query efficiently.
 
 ```text
 /plugin install pg-facade --marketplace Magic-Man-us/agent-pg-facade
 ```
 
-Claude Code asks for the connection string and whether to stay read-only. The plugin adds the `postgres` MCP server and a [skill](plugin/skills/postgres/SKILL.md) that tells the assistant how to query efficiently.
+**Claude Code, one command.**
 
-### Any MCP client
+```sh
+claude mcp add postgres \
+  -e PGFACADE_DSN='postgresql://user:password@localhost:5432/mydb' \
+  -e PGFACADE_READ_ONLY=true \
+  -- uvx --from git+https://github.com/Magic-Man-us/agent-pg-facade pgfacade mcp
+```
 
-Add the server to the client's MCP configuration. For Claude Code that is `.mcp.json` in your project:
+**Any MCP client.** Add this to the client's MCP configuration (`.mcp.json` for Claude Code, `claude_desktop_config.json` for Claude Desktop):
 
 ```json
 {
@@ -29,7 +38,7 @@ Add the server to the client's MCP configuration. For Claude Code that is `.mcp.
       "command": "uvx",
       "args": ["--from", "git+https://github.com/Magic-Man-us/agent-pg-facade", "pgfacade", "mcp"],
       "env": {
-        "PGFACADE_DSN": "postgresql://user@localhost:5432/mydb",
+        "PGFACADE_DSN": "postgresql://user:password@localhost:5432/mydb",
         "PGFACADE_READ_ONLY": "true"
       }
     }
@@ -39,9 +48,62 @@ Add the server to the client's MCP configuration. For Claude Code that is `.mcp.
 
 Then ask the assistant something about your data, for example "describe the `orders` table and count rows created this week".
 
+### Choose the database
+
+`PGFACADE_DSN` is the only thing that selects the database. A remote database is the same setting with its host:
+
+```text
+postgresql://user:password@db.example.com:5432/mydb?sslmode=require
+```
+
+Percent-encode special characters in the password. Add `sslmode=require` for any database you reach over a network.
+
+Test a connection string before giving it to an assistant:
+
+```sh
+PGFACADE_DSN='postgresql://user:password@db.example.com:5432/mydb?sslmode=require' PGFACADE_READ_ONLY=true \
+  uvx --from git+https://github.com/Magic-Man-us/agent-pg-facade pgfacade check
+```
+
+```text
+Connected to mydb as user (PostgreSQL 17.2)
+Mode: read-only
+Tables visible: 12
+Tools exposed: 20
+```
+
+A failure prints the database's own reason, such as a rejected password or an unreachable host, and exits with status 1.
+
+To change the database later:
+
+- Plugin: run `/plugin configure` and enter the new connection string.
+- `claude mcp add` or a configuration file: change `PGFACADE_DSN` and restart the client.
+
+To use several databases, register the server once per database under different names, each with its own `PGFACADE_DSN`:
+
+```json
+{
+  "mcpServers": {
+    "postgres-local": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/Magic-Man-us/agent-pg-facade", "pgfacade", "mcp"],
+      "env": {"PGFACADE_DSN": "postgresql://user:password@localhost:5432/dev"}
+    },
+    "postgres-prod": {
+      "command": "uvx",
+      "args": ["--from", "git+https://github.com/Magic-Man-us/agent-pg-facade", "pgfacade", "mcp"],
+      "env": {
+        "PGFACADE_DSN": "postgresql://reader:password@db.example.com:5432/prod?sslmode=require",
+        "PGFACADE_READ_ONLY": "true"
+      }
+    }
+  }
+}
+```
+
 ### What the assistant can do
 
-`PGFACADE_READ_ONLY=true` exposes 20 read tools and runs every transaction read-only. Remove it to add six write tools, including `pg_rows_insert`, `pg_rows_update`, and `pg_rows_delete`. Raw SQL, schema changes, admin operations, migrations, and notifications stay off until you enable their flag in [Permissions](#permissions). Run `pgfacade ops` to list every operation and the permission it needs.
+`PGFACADE_READ_ONLY=true` exposes 20 read tools and runs every transaction read-only. Remove it to add six write tools, including `pg_rows_insert`, `pg_rows_update`, and `pg_rows_delete`. Raw SQL, schema changes, admin operations, migrations, and notifications stay off until you enable their flag in [Permissions](#permissions). Every tool is listed in the [tool reference](plugin/skills/postgres/reference/tools.md); `pgfacade ops` prints the same catalog.
 
 A local stdio session needs no API key: it runs as the database user in `PGFACADE_DSN`, so connect as a user that holds only the privileges the assistant should have. The server tells the assistant which tables exist when the session starts (up to 50, with estimated row counts). The REST API and MCP over HTTP always require keys.
 

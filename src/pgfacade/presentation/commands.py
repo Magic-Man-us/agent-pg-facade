@@ -43,5 +43,11 @@ class KeygenCommand(BaseModel):
     cmd: Literal[CliOperation.KEYGEN] = CliOperation.KEYGEN
 
 
-CliCommand = Annotated[ApiCommand | McpCommand | OpsCommand | KeygenCommand, Field(discriminator="cmd")]
+class CheckCommand(BaseModel):
+    model_config = CONTRACT_CONFIG
+
+    cmd: Literal[CliOperation.CHECK] = CliOperation.CHECK
+
+
+CliCommand = Annotated[ApiCommand | McpCommand | OpsCommand | KeygenCommand | CheckCommand, Field(discriminator="cmd")]
 CLI_COMMAND_ADAPTER = TypeAdapter(CliCommand)

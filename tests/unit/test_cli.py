@@ -7,7 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from pgfacade.presentation.cli import main
-from pgfacade.presentation.commands import CLI_COMMAND_ADAPTER, ApiCommand, KeygenCommand, McpCommand, OpsCommand
+from pgfacade.presentation.commands import CLI_COMMAND_ADAPTER, ApiCommand, CheckCommand, KeygenCommand, McpCommand, OpsCommand
 from pgfacade.shared.types import CommandArgument, CommandArguments, ServerHost, ServerPort
 
 
@@ -18,6 +18,7 @@ from pgfacade.shared.types import CommandArgument, CommandArguments, ServerHost,
         (Namespace(cmd="mcp", transport="sse", host="localhost", port="8081"), McpCommand(transport="sse", host="localhost", port=8081)),
         (Namespace(cmd="ops"), OpsCommand()),
         (Namespace(cmd="keygen"), KeygenCommand()),
+        (Namespace(cmd="check"), CheckCommand()),
     ],
 )
 def test_cli_adapter_validates_namespace(namespace: Namespace, expected: object) -> None:
@@ -82,3 +83,13 @@ def test_mcp_default_dispatch_uses_stdio(monkeypatch: pytest.MonkeyPatch) -> Non
     main(["mcp"])
     create_mcp.assert_called_once_with()
     create_mcp.return_value.run.assert_called_once_with()
+
+
+def test_check_reports_an_unreachable_database_and_fails(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setenv("PGFACADE_DSN", "postgresql://nobody:synthetic-private-password@127.0.0.1:9/absent")
+    with pytest.raises(SystemExit) as exc:
+        main(["check"])
+    assert exc.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("Could not connect to the database in PGFACADE_DSN:")
+    assert "synthetic-private-password" not in captured.err + captured.out
