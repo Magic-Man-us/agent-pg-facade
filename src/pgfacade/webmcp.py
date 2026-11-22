@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Annotated, Literal, Union
 
 from fastmcp import FastMCP
@@ -18,11 +19,11 @@ from starlette.middleware import Middleware as ASGIMiddleware
 
 from pgfacade import __version__
 from pgfacade.application.context import ExecutionContext
-from pgfacade.application.errors import NotFound, RequestValidationFailure, error_payload, failure
+from pgfacade.application.errors import MissingCredential, NotFound, PgFacadeError, RequestValidationFailure, error_payload, failure
 from pgfacade.application.registry import OpSpec
 from pgfacade.application.types import ExecutionProvenance
 from pgfacade.authorization.credentials import bearer_token
-from pgfacade.authorization.providers import IdentityProvider, authenticate, configure_identity_provider
+from pgfacade.authorization.providers import IdentityProvider, authenticate
 from pgfacade.configuration.settings import ANONYMOUS, PgSettings
 from pgfacade.contracts.base import Contract, RequestContract
 from pgfacade.contracts.enums import Operation, OperationHint
@@ -31,10 +32,10 @@ from pgfacade.contracts.requests import Batch
 from pgfacade.contracts.schema import TableList, TableListInput
 from pgfacade.contracts.types import NonEmptyItems
 from pgfacade.facade import PgFacade
-from pgfacade.infrastructure.startup import startup_command
 from pgfacade.presentation.middleware import RequestBodyLimit
+from pgfacade.presentation.runtime import ServerRuntime, server_runtime
 from pgfacade.shared.enums import McpTransport
-from pgfacade.shared.types import McpHttpTransport, McpLifespanState
+from pgfacade.shared.types import ApiKey, McpHttpTransport, McpLifespanState, McpToolName
 
 INSTRUCTIONS = """\
 PostgreSQL access. Address tables as "table" (default schema) or "schema.table".
@@ -51,6 +52,14 @@ pg_migration_revision + pg_migration_run for schema changes in a tracked project
 
 
 _TABLE_SUMMARY_LIMIT = 50
+# Tools are registered for the widest caller the server settings permit; each caller's list is narrowed from it.
+_DISCOVERY = ExecutionContext(principal=ANONYMOUS, provenance=ExecutionProvenance.MCP)
+
+type ContextResolver = Callable[[], Awaitable[ExecutionContext]]
+
+
+def _tool_name(spec: OpSpec) -> McpToolName:
+    return f"pg_{spec.area}_{spec.action}"
 
 
 async def _table_summary(db: PgFacade) -> str:
@@ -83,22 +92,54 @@ class _Errors(Middleware):
             return ToolResult(structured_content=error_payload(exc), is_error=True)
 
 
+class _CallerTools(Middleware):
+    """Narrow tools/list to the operations the authenticated caller may run, as GET /ops does for REST."""
+
+    def __init__(self, app: PgFacade, resolve_context: ContextResolver) -> None:
+        self._app = app
+        self._resolve_context = resolve_context
+
+    async def on_list_tools(
+        self, context: MiddlewareContext[mt.ListToolsRequest], call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]]
+    ) -> Sequence[Tool]:
+        tools = await call_next(context)
+        try:
+            caller = await self._resolve_context()
+        except PgFacadeError:
+            # Discovery without a usable credential shows the server catalog; every call still authenticates.
+            return tools
+        allowed = {_tool_name(spec) for spec in self._app.allowed_ops(caller)}
+        return [tool for tool in tools if tool.name in allowed]
+
+
+async def _caller(settings: PgSettings, key: ApiKey | None, provider: IdentityProvider | None) -> ExecutionContext:
+    return ExecutionContext(principal=await authenticate(settings, key, provider), provenance=ExecutionProvenance.MCP)
+
+
 async def resolve_mcp_context(settings: PgSettings, provider: IdentityProvider | None = None) -> ExecutionContext:
+    """stdio and in-memory sessions: the process owner, or the configured key once keys exist."""
     try:
         request = get_http_request()
     except RuntimeError:
         if not settings.auth_enabled:
             # A stdio session with no configured keys is the process owner, the same trust as a direct library call.
             return ExecutionContext(principal=ANONYMOUS, provenance=ExecutionProvenance.MCP)
-        key = settings.mcp_key.get_secret_value() if settings.mcp_key is not None else None
-    else:
-        key = bearer_token(dict(request.headers))
-    return ExecutionContext(principal=await authenticate(settings, key, provider), provenance=ExecutionProvenance.MCP)
+        return await _caller(settings, settings.mcp_key.get_secret_value() if settings.mcp_key is not None else None, provider)
+    # A session server reached over HTTP still answers to the request, never to the process.
+    return await _caller(settings, bearer_token(dict(request.headers)), provider)
 
 
-def _tool_for(
-    spec: OpSpec, app: PgFacade, resolve_context: Callable[[], Awaitable[ExecutionContext]]
-) -> Callable[..., Awaitable[ToolResult]]:
+async def resolve_mcp_http_context(settings: PgSettings, provider: IdentityProvider | None = None) -> ExecutionContext:
+    """MCP HTTP: the bearer token of the active request is the only credential."""
+    try:
+        request = get_http_request()
+    except RuntimeError:
+        # Work detached from a request has no caller. The stdio key is not a substitute.
+        raise MissingCredential("missing API key") from None
+    return await _caller(settings, bearer_token(dict(request.headers)), provider)
+
+
+def _tool_for(spec: OpSpec, app: PgFacade, resolve_context: ContextResolver) -> Callable[..., Awaitable[ToolResult]]:
     async def tool(request: RequestContract[Contract]) -> ToolResult:
         try:
             context = await resolve_context()
@@ -112,7 +153,7 @@ def _tool_for(
         [inspect.Parameter("request", inspect.Parameter.KEYWORD_ONLY, annotation=spec.request)], return_annotation=spec.envelope
     )
     tool.__annotations__ = {"request": spec.request, "return": spec.envelope}
-    tool.__name__ = f"pg_{spec.area}_{spec.action}"
+    tool.__name__ = _tool_name(spec)
     tool.__doc__ = spec.summary
     return tool
 
@@ -133,19 +174,12 @@ def _batch_parameters(specs: Sequence[OpSpec]) -> dict[str, JsonValue]:
     return create_model("BatchArguments", __base__=Contract, request=(batch, ...)).model_json_schema()
 
 
-def create_mcp(
-    settings: PgSettings | None = None, db: PgFacade | None = None, identity_provider: IdentityProvider | None = None
-) -> FastMCP:
-    settings = settings or (db.settings if db is not None else PgSettings())
-    if db is not None and db.settings != settings:
-        raise ValueError("The supplied facade must use the server settings")
-    provider = configure_identity_provider(settings, identity_provider)
-    db = db or PgFacade(settings)
-    discovery = ExecutionContext(principal=ANONYMOUS, provenance=ExecutionProvenance.MCP)
+def _server(runtime: ServerRuntime, resolve_context: ContextResolver) -> FastMCP:
+    settings, db = runtime.settings, runtime.db
 
     @asynccontextmanager
     async def lifespan(_: FastMCP) -> AsyncIterator[McpLifespanState]:
-        async with startup_command(settings.startup_command), db:
+        async with runtime.running():
             if not settings.auth_enabled:
                 # Keyless sessions have one local principal, so its table list is safe to send before authentication.
                 mcp.instructions = INSTRUCTIONS + await _table_summary(db)
@@ -156,21 +190,18 @@ def create_mcp(
         instructions=INSTRUCTIONS,
         version=__version__,
         lifespan=lifespan,
-        middleware=[_Errors()],
+        middleware=[_Errors(), _CallerTools(db, resolve_context)],
         dereference_schemas=False,
     )
 
-    async def resolve_context() -> ExecutionContext:
-        return await resolve_mcp_context(settings, provider)
-
-    specs = db.allowed_ops(discovery)
+    specs = db.allowed_ops(_DISCOVERY)
     writable = any(spec.perm.write for spec in specs)
     for spec in specs:
         # A batch can do only what its children can, so it is a read on a server that exposes no write operation.
         hint = OperationHint.READ if spec.op == Operation.BATCH_RUN and not writable else spec.hint
         tool = Tool.from_function(
             _tool_for(spec, db, resolve_context),
-            name=f"pg_{spec.area}_{spec.action}",
+            name=_tool_name(spec),
             annotations=mt.ToolAnnotations(
                 read_only_hint=hint == OperationHint.READ,
                 destructive_hint=hint == OperationHint.DESTRUCTIVE,
@@ -187,6 +218,14 @@ def create_mcp(
     return mcp
 
 
+def create_mcp(
+    settings: PgSettings | None = None, db: PgFacade | None = None, identity_provider: IdentityProvider | None = None
+) -> FastMCP:
+    """Server for stdio and in-memory sessions."""
+    runtime = server_runtime(settings, db, identity_provider, require_auth=False)
+    return _server(runtime, partial(resolve_mcp_context, runtime.settings, runtime.identity_provider))
+
+
 def create_mcp_http_app(
     settings: PgSettings | None = None,
     db: PgFacade | None = None,
@@ -194,11 +233,12 @@ def create_mcp_http_app(
     *,
     transport: McpHttpTransport = McpTransport.HTTP,
 ) -> StarletteWithLifespan:
-    settings = settings or (db.settings if db is not None else PgSettings())
-    if not settings.auth_enabled:
-        raise ValueError("API keys or access_control must be configured before starting a server")
-    server = create_mcp(settings, db, identity_provider)
-    middleware = ASGIMiddleware(RequestBodyLimit, max_bytes=settings.max_request_bytes, timeout_s=settings.request_read_timeout_s)
+    """ASGI app for MCP over HTTP. Every tool call authenticates from its own request."""
+    runtime = server_runtime(settings, db, identity_provider, require_auth=True)
+    server = _server(runtime, partial(resolve_mcp_http_context, runtime.settings, runtime.identity_provider))
+    middleware = ASGIMiddleware(
+        RequestBodyLimit, max_bytes=runtime.settings.max_request_bytes, timeout_s=runtime.settings.request_read_timeout_s
+    )
     return server.http_app(
         transport=transport.value,  # type: ignore[arg-type]  # FastMCP declares the same wire values as string literals.
         middleware=[middleware],
