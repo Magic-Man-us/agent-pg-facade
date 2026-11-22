@@ -1,0 +1,3 @@
+-- category: health
+-- description: Who is waiting on whom
+SELECT blocked.pid AS blocked_pid, blocked.usename AS blocked_user, left(blocked.query, 300) AS blocked_query, blocking.pid AS blocking_pid, blocking.usename AS blocking_user, blocking.state AS blocking_state, left(blocking.query, 300) AS blocking_query FROM pg_stat_activity blocked CROSS JOIN LATERAL unnest(pg_blocking_pids(blocked.pid)) AS b(pid) JOIN pg_stat_activity blocking ON blocking.pid = b.pid ORDER BY blocked.query_start

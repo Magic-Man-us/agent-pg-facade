@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily encrypted PGFacade database backup
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=15min
+Persistent=yes
+Unit=pgfacade-backup.service
+
+[Install]
+WantedBy=timers.target

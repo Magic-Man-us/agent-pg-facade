@@ -1,0 +1,1 @@
+CREATE TRIGGER {} AFTER {} ON {} FOR EACH ROW EXECUTE FUNCTION {}.notify_change({}, {})

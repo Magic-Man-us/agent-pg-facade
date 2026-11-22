@@ -1,0 +1,1 @@
+SELECT to_regprocedure('_pgfacade.run_lifecycle(bigint)') IS NOT NULL AS ok

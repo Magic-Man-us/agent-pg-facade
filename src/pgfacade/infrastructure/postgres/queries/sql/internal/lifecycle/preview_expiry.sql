@@ -1,0 +1,1 @@
+SELECT (%s <= now())::int AS count

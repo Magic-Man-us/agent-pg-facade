@@ -1,0 +1,1 @@
+ALTER COLUMN {} {} NOT NULL

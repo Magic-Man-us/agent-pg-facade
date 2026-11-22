@@ -1,0 +1,1 @@
+DELETE FROM _pgfacade.lifecycle_policies WHERE id = %s

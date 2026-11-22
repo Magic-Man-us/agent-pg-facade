@@ -1,0 +1,1 @@
+COPY {table}{cols} FROM STDIN (FORMAT csv, HEADER {header}, DELIMITER {delim})

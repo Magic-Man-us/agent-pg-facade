@@ -1,0 +1,77 @@
+connector_id = "local"
+default_schema = "app"
+lifecycle_sweep_s = 0
+
+[database]
+kind = "postgres"
+host = "localhost"
+port = 5432
+dbname = "pgfacade_development"
+user = "development_connector"
+
+[access_control]
+max_batch_operations = 100
+
+[access_control.identity]
+kind = "mock"
+
+[[access_control.identity.records]]
+token = "demo-reader-not-a-google-token"
+[access_control.identity.records.identity]
+subject = "mock-reader"
+name = "Demo reader"
+issuer = "mock"
+groups = ["mock-report-readers"]
+
+[[access_control.identity.records]]
+token = "demo-writer-not-a-google-token"
+[access_control.identity.records.identity]
+subject = "mock-writer"
+name = "Demo writer"
+issuer = "mock"
+groups = ["mock-report-writers"]
+
+[access_control.execution_identities.reports_reader]
+role = "pgfacade_reader"
+read_only = true
+
+[access_control.execution_identities.reports_writer]
+role = "pgfacade_writer"
+read_only = false
+
+[[access_control.policies]]
+id = "connector-status"
+effect = "allow"
+groups = ["mock-report-readers", "mock-report-writers"]
+connector = "local"
+operations = ["server.health", "server.whoami"]
+resources = ["@connector"]
+execution_identity = "reports_reader"
+priority = 10
+
+[[access_control.policies]]
+id = "reports-read"
+effect = "allow"
+groups = ["mock-report-readers", "mock-report-writers"]
+connector = "local"
+operations = ["rows.select", "rows.get", "rows.count", "rows.exists", "rows.aggregate", "rows.export_csv"]
+resources = ["app.notes"]
+execution_identity = "reports_reader"
+priority = 10
+
+[[access_control.policies]]
+id = "reports-write"
+effect = "allow"
+groups = ["mock-report-writers"]
+connector = "local"
+operations = ["rows.*"]
+resources = ["app.notes"]
+execution_identity = "reports_writer"
+
+[[access_control.policies]]
+id = "protect-notes-deletion"
+effect = "deny"
+groups = ["mock-report-readers", "mock-report-writers"]
+connector = "local"
+operations = ["rows.delete"]
+resources = ["app.notes"]

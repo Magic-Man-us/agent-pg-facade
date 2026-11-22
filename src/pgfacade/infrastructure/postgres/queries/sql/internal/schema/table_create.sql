@@ -1,0 +1,1 @@
+CREATE TABLE {ine}{table} ({defs})

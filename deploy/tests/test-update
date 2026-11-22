@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly UPDATE_SOURCE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)/update
+readonly TEST_ROOT=$(mktemp -d /tmp/pgfacade-update-test.XXXXXX)
+trap 'rm -rf -- "$TEST_ROOT"' EXIT
+
+mkdir "$TEST_ROOT/commands"
+cat > "$TEST_ROOT/commands/sudo" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+[[ "$1" == -n ]] && shift
+printf '%s\n' "$*" >> "$FAKE_LOG"
+case "$1" in
+    true|chgrp|chown|systemctl|systemd-analyze) exit 0 ;;
+    install)
+        shift
+        args=()
+        while (( $# )); do
+            case "$1" in
+                -o|-g) shift 2 ;;
+                *) args+=("$1"); shift ;;
+            esac
+        done
+        exec /usr/bin/install "${args[@]}"
+        ;;
+    /usr/bin/python3.12)
+        target="${@: -1}"
+        mkdir -p "$target/bin"
+        printf '#!/usr/bin/env bash\nexit 0\n' > "$target/bin/python"
+        chmod 0755 "$target/bin/python"
+        exit 0
+        ;;
+esac
+exec "$@"
+STUB
+cat > "$TEST_ROOT/commands/uv" <<'STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'uv %s\n' "$*" >> "$FAKE_LOG"
+case "$1" in
+    version) printf '0.3.0\n' ;;
+    run|pip) exit 0 ;;
+    export|build)
+        mode=$1
+        shift
+        while (( $# )); do
+            case "$1" in
+                --output-file|--out-dir) target=$2; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        if [[ "$mode" == export ]]; then
+            printf 'example==1.0 --hash=sha256:abc\n' > "$target"
+        else
+            mkdir "$target"
+            printf 'synthetic wheel\n' > "$target/pgfacade-0.3.0-py3-none-any.whl"
+        fi
+        ;;
+esac
+STUB
+cat > "$TEST_ROOT/commands/git" <<'STUB'
+#!/usr/bin/env bash
+printf '0123456789012345678901234567890123456789\n'
+STUB
+cat > "$TEST_ROOT/commands/logger" <<'STUB'
+#!/usr/bin/env bash
+printf 'log %s\n' "$*" >> "$FAKE_LOG"
+STUB
+cat > "$TEST_ROOT/commands/curl" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+chmod 0755 "$TEST_ROOT/commands/"*
+
+for test_case in success failure; do
+    fixture="$TEST_ROOT/$test_case"
+    checkout="$fixture/checkout"
+    app="$fixture/app"
+    mkdir -p "$checkout/src" "$checkout/tests" "$checkout/docs" "$checkout/docs/examples" "$checkout/deploy" "$app/releases/old/venv/bin"
+    printf 'old environment\n' > "$app/releases/old/venv/marker"
+    ln -s "$app/releases/old/venv" "$app/.venv"
+    printf 'old unit\n' > "$fixture/installed.service"
+    printf 'old manifest\n' > "$app/release-info.txt"
+    cp -R "$(dirname -- "$UPDATE_SOURCE")/." "$checkout/deploy/"
+    printf 'new unit\n' > "$checkout/deploy/pgfacade.service"
+    printf 'synthetic checker\n' > "$checkout/deploy/check-service.py"
+    printf '#!/usr/bin/env bash\n[[ "$FAIL_ACCEPTANCE" == 0 ]]\n' > "$checkout/deploy/check-host"
+    touch "$checkout/pyproject.toml" "$checkout/uv.lock" "$checkout/README.md" \
+        "$checkout/docs/access-control.md" "$checkout/docs/examples/mock-access.yaml" "$checkout/docs/examples/mock-access.toml"
+    sed \
+        -e "s|^readonly APP_ROOT=.*|readonly APP_ROOT=$app|" \
+        -e "s|^readonly UNIT_PATH=.*|readonly UNIT_PATH=$fixture/installed.service|" \
+        -e "s|^readonly LOCK_DIRECTORY=.*|readonly LOCK_DIRECTORY=$fixture/lock|" \
+        "$UPDATE_SOURCE" > "$checkout/deploy/update"
+    chmod 0755 "$checkout/deploy/update"
+    fail_acceptance=0
+    [[ "$test_case" == failure ]] && fail_acceptance=1
+    update_status=0
+    PATH="$TEST_ROOT/commands:$PATH" FAKE_LOG="$fixture/commands.log" FAIL_ACCEPTANCE="$fail_acceptance" \
+        "$checkout/deploy/update" || update_status=$?
+    if [[ "$test_case" == success ]]; then
+        (( update_status == 0 ))
+        [[ "$(readlink "$app/.venv")" != "$app/releases/old/venv" ]]
+        [[ "$(cat "$fixture/installed.service")" == 'new unit' ]]
+        grep --quiet '^snapshot_sha256=' "$app/release-info.txt"
+    else
+        (( update_status != 0 ))
+        [[ "$(readlink "$app/.venv")" == "$app/releases/old/venv" ]]
+        [[ "$(cat "$fixture/installed.service")" == 'old unit' ]]
+        [[ "$(cat "$app/release-info.txt")" == 'old manifest' ]]
+        grep --quiet 'Acceptance failed; restoring' "$fixture/commands.log"
+    fi
+    [[ "$(cat "$app/releases/old/venv/marker")" == 'old environment' ]]
+    grep --quiet -- 'pip sync --require-hashes' "$fixture/commands.log"
+    printf 'PASS updater %s path\n' "$test_case"
+done

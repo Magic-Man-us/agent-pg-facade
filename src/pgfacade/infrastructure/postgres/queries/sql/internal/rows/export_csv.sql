@@ -1,0 +1,1 @@
+COPY ({}) TO STDOUT (FORMAT csv, HEADER {})

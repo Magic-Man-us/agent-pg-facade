@@ -1,0 +1,1 @@
+SELECT {select} FROM {table}{where}{group}{order} LIMIT {limit}

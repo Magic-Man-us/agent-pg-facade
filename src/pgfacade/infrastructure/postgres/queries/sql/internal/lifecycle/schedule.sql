@@ -1,0 +1,1 @@
+SELECT cron.schedule(%s, %s, %s)

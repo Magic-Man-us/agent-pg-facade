@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+readonly SYSTEM_PYTHON=/usr/bin/python3.12
+readonly SOCKET_DIRECTORY=/var/run/postgresql
+readonly CHECKOUT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+
+log() {
+    logger --stderr --tag pgfacade-test -- "$*"
+}
+
+if (( EUID == 0 )) || (( $# != 0 )); then
+    log 'Usage: deploy/test, run as the checkout owner'
+    exit 1
+fi
+UV=$(command -v uv)
+readonly UV
+sudo -n true
+STAGING=$(mktemp -d /tmp/pgfacade-test.XXXXXXXXXX)
+readonly STAGING
+readonly SOURCE="$STAGING/source"
+readonly DATABASE="pgfacade_check_${BASHPID}_$(date --utc +%s%N)"
+created=false
+
+finish() {
+    test_status=$?
+    trap - EXIT
+    if "$created"; then
+        if ! sudo -n -u postgres dropdb --host="$SOCKET_DIRECTORY" --port=5432 --force -- "$DATABASE"; then
+            log "Scratch database cleanup failed: $DATABASE"
+            test_status=1
+        fi
+    fi
+    rm -rf -- "$STAGING"
+    exit "$test_status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkdir "$SOURCE"
+tar --exclude=__pycache__ --exclude='*.pyc' -C "$CHECKOUT" -cf - \
+    src tests deploy/check-service.py pyproject.toml uv.lock README.md docs/access-control.md \
+    docs/examples/mock-access.yaml docs/examples/mock-access.toml \
+    | tar -C "$SOURCE" -xf -
+cd "$SOURCE"
+log 'Installing the locked test environment into an isolated source snapshot'
+"$UV" sync --frozen --python "$SYSTEM_PYTHON" --group dev --link-mode=copy
+sudo -n chgrp --no-dereference --recursive postgres "$STAGING"
+find "$STAGING" -type d -exec chmod g+rX,o-rwx {} +
+find "$STAGING" -type f -exec chmod g+rX,o-rwx {} +
+sudo -n -u postgres createdb --host="$SOCKET_DIRECTORY" --port=5432 -- "$DATABASE"
+created=true
+log "Running the full suite against scratch database $DATABASE"
+sudo -n -u postgres env -u PYTHONOPTIMIZE \
+    PGHOST="$SOCKET_DIRECTORY" PGPORT=5432 PGUSER=postgres \
+    PGFACADE_TEST_DSN="postgresql:///$DATABASE" \
+    PYTHONPATH="$SOURCE/src" PYTHONDONTWRITEBYTECODE=1 \
+    "$SOURCE/.venv/bin/python" -m pytest -p no:cacheprovider tests -q
+log 'Full suite passed; removing this run’s scratch database and source snapshot'

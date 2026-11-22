@@ -1,0 +1,3 @@
+-- category: size
+-- description: Total relation size per schema in the current database
+SELECT n.nspname AS schema_name, count(*) AS relations, pg_size_pretty(sum(pg_total_relation_size(c.oid))) AS size, sum(pg_total_relation_size(c.oid))::bigint AS bytes FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','m') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' GROUP BY 1 ORDER BY 4 DESC

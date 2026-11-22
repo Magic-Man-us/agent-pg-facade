@@ -1,0 +1,1 @@
+SELECT * FROM _pgfacade.lifecycle_runs WHERE (%s::bigint IS NULL OR policy_id = %s) ORDER BY id DESC LIMIT %s

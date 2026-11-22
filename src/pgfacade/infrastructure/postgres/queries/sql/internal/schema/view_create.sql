@@ -1,0 +1,1 @@
+CREATE {replace}{mat}VIEW {name} AS {body}{data}

@@ -1,0 +1,3 @@
+-- category: schema
+-- description: Tables without a primary key
+SELECT n.nspname AS schema_name, c.relname AS table_name, greatest(c.reltuples, 0)::bigint AS est_rows FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.oid AND i.indisprimary) ORDER BY 3 DESC

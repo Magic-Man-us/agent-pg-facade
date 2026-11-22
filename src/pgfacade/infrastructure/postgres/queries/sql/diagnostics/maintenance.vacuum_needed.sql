@@ -1,0 +1,4 @@
+-- category: maintenance
+-- description: Tables past autovacuum's threshold that have not been vacuumed yet
+-- param: limit:int=50 Max rows
+SELECT s.schemaname AS schema_name, s.relname AS table_name, s.n_dead_tup AS dead_rows, current_setting('autovacuum_vacuum_threshold')::int + current_setting('autovacuum_vacuum_scale_factor')::float * c.reltuples AS threshold, s.last_autovacuum FROM pg_stat_user_tables s JOIN pg_class c ON c.oid = s.relid WHERE s.n_dead_tup > current_setting('autovacuum_vacuum_threshold')::int + current_setting('autovacuum_vacuum_scale_factor')::float * c.reltuples ORDER BY s.n_dead_tup DESC LIMIT %(limit)s

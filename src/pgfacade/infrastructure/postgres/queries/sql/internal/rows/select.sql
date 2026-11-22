@@ -1,0 +1,1 @@
+SELECT {distinct}{cols} FROM {table}{where}{order} LIMIT {limit} OFFSET {offset}

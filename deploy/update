@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+readonly APP_ROOT=/opt/pgfacade
+readonly UNIT_PATH=/etc/systemd/system/pgfacade.service
+readonly LOCK_DIRECTORY=/run/pgfacade-deploy
+readonly SYSTEM_PYTHON=/usr/bin/python3.12
+readonly CHECKOUT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)
+
+log() {
+    logger --stderr --tag pgfacade-update -- "$*"
+}
+
+if (( EUID == 0 )); then
+    log 'Run this command as the checkout owner; it uses sudo only for installation'
+    exit 1
+fi
+if (( $# != 0 )); then
+    log 'Usage: deploy/update'
+    exit 1
+fi
+UV=$(command -v uv)
+readonly UV
+test -x "$SYSTEM_PYTHON"
+sudo -n true
+sudo -n test -L "$APP_ROOT/.venv"
+sudo -n test -f "$UNIT_PATH"
+sudo -n test -f "$APP_ROOT/release-info.txt"
+for temporary_link in "$APP_ROOT/.venv.next" "$APP_ROOT/.venv.rollback"; do
+    sudo -n test ! -e "$temporary_link"
+    sudo -n test ! -L "$temporary_link"
+done
+sudo -n install -d -o root -g root -m 0755 "$LOCK_DIRECTORY"
+sudo -n touch "$LOCK_DIRECTORY/lock"
+sudo -n chmod 0644 "$LOCK_DIRECTORY/lock"
+exec 9<"$LOCK_DIRECTORY/lock"
+if ! flock --nonblock 9; then
+    log 'Another deployment is in progress'
+    exit 1
+fi
+
+STAGING=$(mktemp -d /tmp/pgfacade-update.XXXXXX)
+readonly STAGING
+readonly SNAPSHOT="$STAGING/source"
+changed=false
+release=
+previous=
+
+rollback() {
+    log 'Acceptance failed; restoring the previous release'
+    sudo -n systemctl stop pgfacade.service || return 1
+    sudo -n ln -s -- "$previous" "$APP_ROOT/.venv.rollback" || return 1
+    sudo -n mv -Tf -- "$APP_ROOT/.venv.rollback" "$APP_ROOT/.venv" || return 1
+    sudo -n install -o root -g root -m 0644 "$release/previous.service" "$UNIT_PATH" || return 1
+    sudo -n install -o root -g root -m 0640 "$release/previous-info.txt" "$APP_ROOT/release-info.txt" || return 1
+    sudo -n systemctl daemon-reload || return 1
+    sudo -n systemctl reset-failed pgfacade.service || return 1
+    sudo -n systemctl start pgfacade.service || return 1
+}
+
+finish() {
+    update_status=$?
+    trap - EXIT
+    if (( update_status != 0 )) && "$changed"; then
+        if ! rollback; then
+            log 'Rollback failed; inspect pgfacade.service and the preserved release before retrying'
+        fi
+    fi
+    if [[ -n "$release" ]] && sudo -n test -L "$APP_ROOT/.venv.next"; then
+        if [[ "$(sudo -n readlink "$APP_ROOT/.venv.next")" == "$release/venv" ]]; then
+            sudo -n rm -- "$APP_ROOT/.venv.next"
+        fi
+    fi
+    rm -rf -- "$STAGING"
+    exit "$update_status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+mkdir "$SNAPSHOT"
+tar --exclude=__pycache__ --exclude='*.pyc' -C "$CHECKOUT" -cf - \
+    src tests pyproject.toml uv.lock README.md docs/access-control.md \
+    docs/examples/mock-access.yaml docs/examples/mock-access.toml \
+    deploy/pgfacade.service deploy/check-service.py deploy/check-host deploy/update deploy/test \
+    deploy/pgfacade-backup deploy/pgfacade-backup.service deploy/pgfacade-backup.timer \
+    deploy/provision.sql deploy/service.conf deploy/README.md deploy/SECURITY.md deploy/tests/test-update \
+    | tar -C "$SNAPSHOT" -xf -
+tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner \
+    -C "$SNAPSHOT" -cf "$STAGING/source.tar" .
+SOURCE_HASH=$(sha256sum "$STAGING/source.tar" | cut -d ' ' -f 1)
+readonly SOURCE_HASH
+GIT_HEAD=$(git -C "$CHECKOUT" rev-parse HEAD)
+readonly GIT_HEAD
+
+log 'Checking the source snapshot and building the locked release'
+cd "$SNAPSHOT"
+VERSION=$("$UV" version --short)
+readonly VERSION
+if [[ ! "$VERSION" =~ ^[0-9][A-Za-z0-9.+-]*$ ]]; then
+    log 'The project version is not a valid release identifier'
+    exit 1
+fi
+env -u PYTHONOPTIMIZE "$UV" run --frozen --python "$SYSTEM_PYTHON" --group dev ruff check src tests deploy/check-service.py
+env -u PYTHONOPTIMIZE "$UV" run --frozen --python "$SYSTEM_PYTHON" --group dev ruff format --check src tests deploy/check-service.py
+env -u PGFACADE_TEST_DSN -u PYTHONOPTIMIZE "$UV" run --frozen --python "$SYSTEM_PYTHON" --group dev \
+    pytest -p no:cacheprovider tests -q
+"$UV" export --frozen --no-dev --no-emit-project --format requirements-txt --output-file "$STAGING/requirements.txt" >/dev/null
+"$UV" build --wheel --out-dir "$STAGING/wheels"
+wheels=("$STAGING"/wheels/*.whl)
+if (( ${#wheels[@]} != 1 )) || [[ ! -f "${wheels[0]}" ]]; then
+    log 'Expected exactly one built wheel'
+    exit 1
+fi
+readonly WHEEL="${wheels[0]}"
+WHEEL_HASH=$(sha256sum "$WHEEL" | cut -d ' ' -f 1)
+readonly WHEEL_HASH
+readonly RELEASE_ID="$VERSION-${SOURCE_HASH:0:12}-$(date --utc +%Y%m%dT%H%M%S%N)"
+release="$APP_ROOT/releases/$RELEASE_ID"
+previous=$(sudo -n readlink -f "$APP_ROOT/.venv")
+if [[ "$previous" != "$APP_ROOT/"* ]]; then
+    log 'The active environment is outside the deployment directory'
+    exit 1
+fi
+
+sudo -n systemctl start pgfacade-backup.service
+sudo -n mkdir --mode=0750 -- "$release"
+sudo -n chgrp pgfacade "$release"
+sudo -n "$SYSTEM_PYTHON" -m venv --without-pip "$release/venv"
+sudo -n "$UV" pip sync --require-hashes --link-mode=copy --python "$release/venv/bin/python" "$STAGING/requirements.txt"
+sudo -n "$UV" pip install --no-deps --link-mode=copy --python "$release/venv/bin/python" "$WHEEL"
+sudo -n install -o root -g root -m 0600 "$STAGING/source.tar" "$release/source.tar"
+sudo -n install -o root -g pgfacade -m 0640 "$WHEEL" "$release/$(basename -- "$WHEEL")"
+sudo -n install -o root -g pgfacade -m 0640 "$STAGING/requirements.txt" "$release/requirements.txt"
+sudo -n install -o root -g pgfacade -m 0640 deploy/pgfacade.service "$release/pgfacade.service"
+sudo -n install -o root -g pgfacade -m 0640 deploy/check-service.py "$release/check-service.py"
+sudo -n install -o root -g root -m 0640 deploy/check-host "$release/check-host"
+sudo -n install -o root -g root -m 0600 "$UNIT_PATH" "$release/previous.service"
+sudo -n install -o root -g root -m 0600 "$APP_ROOT/release-info.txt" "$release/previous-info.txt"
+sudo -n chown -R root:pgfacade "$release/venv"
+sudo -n chmod -R g-w,o-rwx "$release/venv"
+sudo -n systemd-analyze verify "$release/pgfacade.service"
+
+printf 'package=pgfacade %s\nbase_commit=%s\nsource_state=reviewed local snapshot; no git mutation\nsnapshot_sha256=%s\nwheel_sha256=%s\nprevious_release=%s\nverified_utc=%s\n' \
+    "$VERSION" "$GIT_HEAD" "$SOURCE_HASH" "$WHEEL_HASH" "$previous" "$(date --utc --iso-8601=seconds)" \
+    > "$STAGING/release-info.txt"
+
+log "Activating release $RELEASE_ID"
+changed=true
+sudo -n systemctl stop pgfacade.service
+sudo -n ln -s -- "$release/venv" "$APP_ROOT/.venv.next"
+sudo -n mv -Tf -- "$APP_ROOT/.venv.next" "$APP_ROOT/.venv"
+sudo -n install -o root -g root -m 0644 "$release/pgfacade.service" "$UNIT_PATH"
+sudo -n systemctl daemon-reload
+sudo -n systemctl reset-failed pgfacade.service
+sudo -n systemctl start pgfacade.service
+for attempt in $(seq 1 40); do
+    if curl --noproxy '*' --silent --fail --max-time 2 http://127.0.0.1:8765/healthz >/dev/null; then
+        break
+    fi
+    sleep 0.25
+done
+sudo -n bash "$release/check-host"
+sudo -n install -o root -g pgfacade -m 0640 "$STAGING/release-info.txt" "$release/release-info.txt"
+sudo -n install -o root -g root -m 0640 "$STAGING/release-info.txt" "$APP_ROOT/.release-info.next"
+sudo -n mv -Tf -- "$APP_ROOT/.release-info.next" "$APP_ROOT/release-info.txt"
+changed=false
+log "Release $RELEASE_ID passed live acceptance; previous release retained at $previous"

@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly APP_ROOT=/opt/pgfacade
+readonly BACKUP_DIRECTORY=/var/backups/pgfacade
+readonly MAX_BACKUP_AGE_SECONDS=$((36 * 60 * 60))
+readonly MIN_FREE_BYTES=$((10 * 1024 * 1024 * 1024))
+readonly SCRIPT_DIRECTORY=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+
+log() {
+    logger --stderr --tag pgfacade-check -- "$*"
+}
+fail() {
+    log "FAIL $*"
+    exit 1
+}
+expect_property() {
+    actual=$(systemctl show pgfacade.service --property="$1" --value)
+    [[ "$actual" == "$2" ]] || fail "Unexpected service property: $1"
+}
+
+(( EUID == 0 )) || fail 'Run as root for the read-only host checks'
+for unit in pgfacade.service postgresql@16-main.service pgfacade-backup.timer; do
+    systemctl is-active --quiet "$unit" || fail "Inactive unit: $unit"
+done
+for unit in pgfacade.service pgfacade-backup.timer; do
+    systemctl is-enabled --quiet "$unit" || fail "Disabled startup unit: $unit"
+done
+expect_property User pgfacade
+expect_property Group pgfacade
+expect_property WorkingDirectory "$APP_ROOT"
+expect_property ProtectSystem strict
+expect_property ProtectHome yes
+expect_property NoNewPrivileges yes
+expect_property MemoryMax 536870912
+expect_property TasksMax 128
+cmp --silent "$SCRIPT_DIRECTORY/pgfacade.service" /etc/systemd/system/pgfacade.service \
+    || fail 'The installed service unit differs from the checkout'
+log 'PASS service identity, sandbox, startup and unit file'
+
+main_pid=$(systemctl show pgfacade.service --property=MainPID --value)
+[[ "$main_pid" =~ ^[1-9][0-9]*$ ]] || fail 'The service has no main process'
+mapfile -t listeners < <(ss --no-header --listening --tcp --processes '( sport = :8765 )')
+(( ${#listeners[@]} == 1 )) && [[ "$(awk '{print $4}' <<< "${listeners[0]}")" == '127.0.0.1:8765' ]] \
+    || fail 'The API listener is not exclusively 127.0.0.1:8765'
+[[ "${listeners[0]}" == *"pid=$main_pid,"* ]] || fail 'The API listener is not owned by the service process'
+[[ -z "$(ss --no-header --listening --tcp '( sport = :5432 )')" ]] || fail 'PostgreSQL has a TCP listener'
+log 'PASS private HTTP listener and socket-only PostgreSQL'
+
+for protected_directory in "$APP_ROOT" "$APP_ROOT/releases"; do
+    [[ "$(stat -c %U "$protected_directory")" == root ]] || fail 'Unexpected deployment-directory owner'
+    directory_mode=$(stat -c %a "$protected_directory")
+    (( (8#$directory_mode & 0022) == 0 )) || fail 'A deployment directory is writable by others'
+done
+readonly ENVIRONMENT=$(readlink -f "$APP_ROOT/.venv")
+[[ "$ENVIRONMENT" == "$APP_ROOT/releases/"*/venv ]] || fail 'The active environment is outside the release layout'
+[[ -z "$(find "$ENVIRONMENT" \( ! -user root -o \( -type f -o -type d \) -perm /022 \) -print -quit)" ]] \
+    || fail 'The active environment has unexpected ownership or write permissions'
+for secret_path in /etc/pgfacade/keys.json /etc/pgfacade/backup-private.pem; do
+    [[ "$(stat -c '%U:%G:%a' "$secret_path")" == 'root:root:600' ]] || fail 'Unexpected credential metadata'
+    if runuser -u pgfacade -- test -r "$secret_path"; then
+        fail 'The service account can read a protected host credential'
+    fi
+done
+[[ "$(readlink -f "$ENVIRONMENT/bin/python")" == /usr/bin/python3.12 ]] || fail 'The runtime does not use system Python 3.12'
+log 'PASS root-owned deployment and protected credential metadata'
+
+readonly POLICY_OK=$(runuser -u postgres -- psql -X --set=ON_ERROR_STOP=on --tuples-only --no-align --dbname=pgfacade <<'SQL'
+SELECT
+    current_setting('listen_addresses') = ''
+    AND NOT EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL)
+    AND EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE type = 'local' AND auth_method = 'peer'
+                AND user_name = ARRAY['postgres'] AND database = ARRAY['all'])
+    AND EXISTS (SELECT 1 FROM pg_hba_file_rules WHERE type = 'local' AND auth_method = 'peer'
+                AND user_name = ARRAY['pgfacade'] AND database = ARRAY['pgfacade'])
+    AND (SELECT rolpassword IS NULL FROM pg_authid WHERE rolname = 'pgfacade')
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_hba_file_rules
+        WHERE auth_method <> 'reject'
+          AND NOT (type = 'local' AND auth_method = 'peer' AND user_name = ARRAY['postgres'])
+          AND NOT (type = 'local' AND auth_method = 'peer' AND user_name = ARRAY['pgfacade'] AND database = ARRAY['pgfacade'])
+    )
+    AND (SELECT count(*) = 4 AND bool_and(NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND rolcanlogin = (rolname = 'pgfacade'))
+         FROM pg_roles WHERE rolname IN ('pgfacade', 'pgfacade_owner', 'pgfacade_reader', 'pgfacade_writer'))
+    AND (SELECT count(*) = 2 AND bool_and(NOT admin_option AND NOT inherit_option AND set_option AND roleid IN ('pgfacade_reader'::regrole, 'pgfacade_writer'::regrole))
+         FROM pg_auth_members WHERE member = 'pgfacade'::regrole)
+    AND NOT pg_has_role('pgfacade', 'pgfacade_owner', 'MEMBER')
+    AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member IN ('pgfacade_reader'::regrole, 'pgfacade_writer'::regrole))
+    AND NOT EXISTS (SELECT 1 FROM pg_namespace WHERE nspowner IN ('pgfacade'::regrole, 'pgfacade_reader'::regrole, 'pgfacade_writer'::regrole))
+    AND NOT EXISTS (SELECT 1 FROM pg_class WHERE relowner IN ('pgfacade'::regrole, 'pgfacade_reader'::regrole, 'pgfacade_writer'::regrole))
+    AND has_schema_privilege('pgfacade_reader', 'app', 'USAGE')
+    AND has_schema_privilege('pgfacade_writer', 'app', 'USAGE')
+    AND NOT has_schema_privilege('pgfacade', 'app', 'CREATE')
+    AND NOT has_schema_privilege('pgfacade_reader', 'app', 'CREATE')
+    AND NOT has_schema_privilege('pgfacade_writer', 'app', 'CREATE')
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_database d
+        CROSS JOIN LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a
+        WHERE d.datname = 'pgfacade' AND a.grantee = 0
+          AND a.privilege_type IN ('CONNECT', 'TEMPORARY')
+    );
+SQL
+)
+[[ "$POLICY_OK" == t ]] || fail 'PostgreSQL authentication or role policy differs from the restricted deployment'
+log 'PASS PostgreSQL HBA and runtime privilege boundaries'
+
+[[ "$(systemctl show pgfacade-backup.service --property=Result --value)" == success ]] \
+    || fail 'The last backup service run failed'
+backup_name=$(find "$BACKUP_DIRECTORY" -maxdepth 1 -type f -name 'pgfacade-????-??-??.dump.cms' -printf '%f\n' | sort | tail -n 1)
+[[ -n "$backup_name" ]] || fail 'No encrypted database backup exists'
+backup_age=$(( $(date +%s) - $(stat -c %Y "$BACKUP_DIRECTORY/$backup_name") ))
+(( backup_age >= 0 && backup_age <= MAX_BACKUP_AGE_SECONDS )) || fail 'The newest backup is stale or has a future timestamp'
+[[ "$(stat -c '%U:%G:%a' "$BACKUP_DIRECTORY/$backup_name")" == 'root:root:600' ]] \
+    || fail 'Unexpected encrypted-backup metadata'
+read -r free_bytes used_percent < <(df --output=avail,pcent -B1 /var/lib/postgresql | tail -n 1)
+(( free_bytes >= MIN_FREE_BYTES )) || fail 'Less than 10 GiB remains on the database filesystem'
+if (( ${used_percent%\%} >= 90 )); then
+    log "WARN database filesystem usage is $used_percent; capacity planning remains required"
+fi
+log 'PASS recent encrypted backup and minimum disk reserve'
+"$APP_ROOT/.venv/bin/python" "$SCRIPT_DIRECTORY/check-service.py"
+log 'Host and API checks passed; off-server recovery and alert delivery are separate operator requirements'

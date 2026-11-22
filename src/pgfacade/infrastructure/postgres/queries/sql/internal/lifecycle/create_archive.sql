@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS {} (LIKE {} INCLUDING DEFAULTS, archived_at timestamptz NOT NULL DEFAULT now())

@@ -1,0 +1,1 @@
+SELECT *, ttl::text AS ttl FROM _pgfacade.lifecycle_policies ORDER BY id

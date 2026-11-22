@@ -1,0 +1,1 @@
+SELECT _pgfacade.run_lifecycle(NULL)

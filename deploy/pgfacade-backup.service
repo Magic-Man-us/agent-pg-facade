@@ -1,0 +1,32 @@
+[Unit]
+Description=Encrypted PGFacade database backup
+After=postgresql@16-main.service
+Requires=postgresql@16-main.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/pgfacade-backup
+TimeoutStartSec=30min
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/backups/pgfacade
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+InaccessiblePaths=/etc/pgfacade/backup-private.pem /etc/pgfacade/keys.json
+TasksMax=64
+MemoryMax=512M
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7

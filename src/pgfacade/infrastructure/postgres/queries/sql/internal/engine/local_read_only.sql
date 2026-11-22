@@ -1,0 +1,1 @@
+SET LOCAL transaction_read_only = on

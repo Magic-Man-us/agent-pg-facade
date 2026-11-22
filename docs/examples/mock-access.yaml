@@ -1,0 +1,65 @@
+connector_id: local
+default_schema: app
+lifecycle_sweep_s: 0
+
+database:
+  kind: postgres
+  host: localhost
+  port: 5432
+  dbname: pgfacade_development
+  user: development_connector
+
+access_control:
+  max_batch_operations: 100
+  identity:
+    kind: mock
+    records:
+      - token: demo-reader-not-a-google-token
+        identity:
+          subject: mock-reader
+          name: Demo reader
+          issuer: mock
+          groups: [mock-report-readers]
+      - token: demo-writer-not-a-google-token
+        identity:
+          subject: mock-writer
+          name: Demo writer
+          issuer: mock
+          groups: [mock-report-writers]
+  execution_identities:
+    reports_reader:
+      role: pgfacade_reader
+      read_only: true
+    reports_writer:
+      role: pgfacade_writer
+      read_only: false
+  policies:
+    - id: connector-status
+      effect: allow
+      groups: [mock-report-readers, mock-report-writers]
+      connector: local
+      operations: [server.health, server.whoami]
+      resources: ['@connector']
+      execution_identity: reports_reader
+      priority: 10
+    - id: reports-read
+      effect: allow
+      groups: [mock-report-readers, mock-report-writers]
+      connector: local
+      operations: [rows.select, rows.get, rows.count, rows.exists, rows.aggregate, rows.export_csv]
+      resources: [app.notes]
+      execution_identity: reports_reader
+      priority: 10
+    - id: reports-write
+      effect: allow
+      groups: [mock-report-writers]
+      connector: local
+      operations: ['rows.*']
+      resources: [app.notes]
+      execution_identity: reports_writer
+    - id: protect-notes-deletion
+      effect: deny
+      groups: [mock-report-readers, mock-report-writers]
+      connector: local
+      operations: [rows.delete]
+      resources: [app.notes]

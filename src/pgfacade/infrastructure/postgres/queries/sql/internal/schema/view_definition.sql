@@ -1,0 +1,1 @@
+SELECT pg_get_viewdef(to_regclass(%s), true) AS d

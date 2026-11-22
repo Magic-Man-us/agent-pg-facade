@@ -1,0 +1,1 @@
+SELECT now() + %s::interval AS at

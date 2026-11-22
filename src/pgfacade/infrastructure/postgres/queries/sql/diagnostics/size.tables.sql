@@ -1,0 +1,4 @@
+-- category: size
+-- description: Largest tables with table, index, and toast breakdown
+-- param: limit:int=50 Max rows
+SELECT n.nspname AS schema_name, c.relname AS table_name, pg_size_pretty(pg_total_relation_size(c.oid)) AS total, pg_size_pretty(pg_relation_size(c.oid)) AS heap, pg_size_pretty(pg_indexes_size(c.oid)) AS indexes, pg_size_pretty(coalesce(pg_total_relation_size(c.reltoastrelid), 0)) AS toast, greatest(c.reltuples, 0)::bigint AS est_rows, pg_total_relation_size(c.oid) AS total_bytes FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE c.relkind IN ('r','p','m') AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema' ORDER BY pg_total_relation_size(c.oid) DESC LIMIT %(limit)s

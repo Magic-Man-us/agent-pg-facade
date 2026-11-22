@@ -1,0 +1,1 @@
+ALTER TABLE {} ADD COLUMN {} timestamptz NOT NULL DEFAULT now()

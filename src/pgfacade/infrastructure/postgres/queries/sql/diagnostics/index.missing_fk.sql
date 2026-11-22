@@ -1,0 +1,3 @@
+-- category: index
+-- description: Foreign key columns without a supporting index (slow deletes and joins)
+SELECT c.conrelid::regclass::text AS table_name, c.conname AS constraint_name, array_agg(a.attname ORDER BY k.ord) AS columns, c.confrelid::regclass::text AS references_table FROM pg_constraint c CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord) JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum WHERE c.contype = 'f' AND NOT EXISTS (SELECT 1 FROM pg_index i WHERE i.indrelid = c.conrelid AND (i.indkey::int2[])[0:array_length(c.conkey,1)-1] @> c.conkey::int2[] AND c.conkey::int2[] @> (i.indkey::int2[])[0:array_length(c.conkey,1)-1]) GROUP BY 1, 2, 4 ORDER BY 1

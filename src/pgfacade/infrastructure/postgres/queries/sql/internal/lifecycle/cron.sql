@@ -1,0 +1,1 @@
+SELECT schedule FROM cron.job WHERE jobname = 'pgfacade_lifecycle'

@@ -1,0 +1,1 @@
+CREATE {unique}INDEX {cc}{ine}{name} ON {table} USING {method} ({cols})
