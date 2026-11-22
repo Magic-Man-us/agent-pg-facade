@@ -145,3 +145,19 @@ async def test_keyless_session_lists_tables_in_its_instructions(users: str) -> N
 async def test_keyed_session_instructions_omit_tables(users: str) -> None:
     async with Client(create_mcp(make_settings())) as client:
         assert client.instructions is not None and users not in client.instructions
+
+
+def test_check_command_reports_the_connection(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from pgfacade.presentation.cli import main
+    from tests.conftest import DSN
+
+    assert DSN is not None
+    monkeypatch.setenv("PGFACADE_DSN", DSN)
+    monkeypatch.setenv("PGFACADE_READ_ONLY", "true")
+    with pytest.raises(SystemExit) as exc:
+        main(["check"])
+    assert exc.value.code == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0].startswith("Connected to ")
+    assert lines[1:] == ["Mode: read-only", lines[2], "Tools exposed: 20"]
+    assert lines[2].startswith("Tables visible: ")

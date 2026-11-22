@@ -8,3 +8,4 @@ class CliOperation(StrEnum):
     MCP = "mcp"
     OPS = "ops"
     KEYGEN = "keygen"
+    CHECK = "check"
