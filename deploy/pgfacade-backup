@@ -5,6 +5,8 @@ umask 077
 readonly BACKUP_DIRECTORY=/var/backups/pgfacade
 readonly PUBLIC_CERTIFICATE=/etc/pgfacade/backup-public.pem
 readonly RETAINED_DAYS=7
+readonly SOCKET_DIRECTORY=/var/run/postgresql
+readonly DATABASE=pgfacade
 
 if (( EUID != 0 )); then
     logger --tag pgfacade-backup --priority user.err 'Backup must run as root'
@@ -27,7 +29,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-runuser -u postgres -- /usr/bin/pg_dump --host=/var/run/postgresql --dbname=pgfacade --format=custom \
+runuser -u postgres -- /usr/bin/pg_dump --host="$SOCKET_DIRECTORY" --dbname="$DATABASE" --format=custom \
     | openssl cms -encrypt -binary -aes-256-gcm -stream -outform DER \
         -out "$backup_temporary" "$PUBLIC_CERTIFICATE"
 

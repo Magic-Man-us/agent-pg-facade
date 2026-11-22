@@ -160,14 +160,17 @@ def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, iden
         return await resolve_mcp_context(settings, provider)
 
     specs = db.allowed_ops(discovery)
+    writable = any(spec.perm.write for spec in specs)
     for spec in specs:
+        # A batch can do only what its children can, so it is a read on a server that exposes no write operation.
+        hint = OperationHint.READ if spec.op == Operation.BATCH_RUN and not writable else spec.hint
         tool = Tool.from_function(
             _tool_for(spec, db, resolve_context),
             name=f"pg_{spec.area}_{spec.action}",
             annotations=mt.ToolAnnotations(
-                read_only_hint=spec.hint == OperationHint.READ,
-                destructive_hint=spec.hint == OperationHint.DESTRUCTIVE,
-                idempotent_hint=spec.idempotent,
+                read_only_hint=hint == OperationHint.READ,
+                destructive_hint=hint == OperationHint.DESTRUCTIVE,
+                idempotent_hint=spec.idempotent or hint == OperationHint.READ,
                 open_world_hint=False,
             ),
             tags={spec.area},

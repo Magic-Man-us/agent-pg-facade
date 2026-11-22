@@ -207,7 +207,7 @@ async def runs(db: Core, req: LifecycleRuns) -> LifecycleRunList:
     return LifecycleRunList(items=[LifecycleRunRecord.model_validate(r) for r in result.rows])
 
 
-@op(LifecycleSchedule, response=Done, perm=ADMIN_WRITE)
+@op(LifecycleSchedule, response=Done, perm=ADMIN_WRITE, hint=OperationHint.DESTRUCTIVE)
 async def schedule(db: Core, req: LifecycleSchedule) -> Done:
     await _require_installed(db)
     if not await _has_cron(db):
