@@ -80,7 +80,7 @@ class OpSpec:
     perm: Perm
     hint: OperationHint
     summary: OperationSummary
-    idempotent: SecurityFlag
+    idempotent: bool
 
 
 REGISTRY: dict[Operation, OpSpec] = {}
@@ -99,7 +99,7 @@ def op[RequestT: RequestContract[Contract], ResultT: Contract](
     response: type[ResultT],
     perm: Perm = READ,
     hint: OperationHint | None = None,
-    idempotent: SecurityFlag | None = None,
+    idempotent: bool | None = None,
 ) -> Callable[[Callable[[MyApp, RequestT], Awaitable[ResultT]]], Callable[[MyApp, RequestT], Awaitable[ResultT]]]:
     result_contract = RequestContract.__class_getitem__(response)
     if not isinstance(result_contract, type) or not issubclass(request, result_contract):

@@ -35,7 +35,6 @@ from pgfacade.infrastructure.postgres.queries.types import (
     QuerySql,
 )
 from pgfacade.shared.config import CONTRACT_CONFIG
-from pgfacade.shared.types import SecurityFlag
 
 IDENTIFIER_TYPES = frozenset({ParamType.TABLE, ParamType.COLUMN, ParamType.IDENTIFIER})
 # Runtime query headers select annotations for dynamically generated Pydantic models.
@@ -59,7 +58,7 @@ class Param(BaseModel):
     type: ParamType
     default: ParameterValue = None
     description: QueryDescription = ""
-    required: SecurityFlag = False
+    required: bool = False
 
     @field_validator("default", mode="before")
     @classmethod
@@ -90,7 +89,7 @@ class QueryDefinition(BaseModel):
         return self
 
     @property
-    def has_identifiers(self) -> SecurityFlag:
+    def has_identifiers(self) -> bool:
         return any(p.type in IDENTIFIER_TYPES for p in self.params.values())
 
     @cached_property

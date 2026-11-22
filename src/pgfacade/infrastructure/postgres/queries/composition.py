@@ -43,7 +43,6 @@ from pgfacade.infrastructure.postgres.types import (
     SqlKeyword,
 )
 from pgfacade.shared.config import CONTRACT_CONFIG
-from pgfacade.shared.types import SecurityFlag
 
 _DML_TAGS = frozenset(SqlCommandTag)
 _JSON_TYPE: LiteralString = "json"
@@ -85,11 +84,11 @@ class Column:
     relkind: RelationKind
 
     @property
-    def is_array(self) -> SecurityFlag:
+    def is_array(self) -> bool:
         return self.category == KnownPostgresTypeCategory.ARRAY
 
     @property
-    def is_json(self) -> SecurityFlag:
+    def is_json(self) -> bool:
         return self.regtype in (_JSON_TYPE, _JSONB_TYPE)
 
     @property
@@ -158,7 +157,7 @@ def kw(word: SqlKeyword) -> sql.SQL:
     return sql.SQL(word)
 
 
-def flag(on: SecurityFlag, word: LiteralString) -> sql.SQL:
+def flag(on: bool, word: LiteralString) -> sql.SQL:
     return sql.SQL(word if on else "")
 
 

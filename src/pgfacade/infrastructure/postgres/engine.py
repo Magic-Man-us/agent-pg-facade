@@ -94,7 +94,7 @@ class Core:
         return self._principal
 
     @property
-    def in_transaction(self) -> SecurityFlag:
+    def in_transaction(self) -> bool:
         return self._conn is not None
 
     def invalidate(self) -> None:
@@ -151,7 +151,7 @@ class Core:
         return sql.SQL("; ").join(parts) if parts else None
 
     @asynccontextmanager
-    async def tx(self, *, read_only: SecurityFlag = False, rollback: SecurityFlag = False) -> AsyncIterator[Conn]:
+    async def tx(self, *, read_only: SecurityFlag = False, rollback: bool = False) -> AsyncIterator[Conn]:
         """One transaction (a savepoint when already bound). Role and read-only mode apply at the top level."""
         async with self.lease() as conn, conn.transaction() as t:
             if self._conn is None:
@@ -312,7 +312,7 @@ class Core:
         async with self.tx() as conn:
             return await self.fetch(conn, text(query), params, limit or self.settings.max_rows)
 
-    async def ddl(self, query: sql.Composable, *, no_tx: SecurityFlag = False, **detail: DatabaseValue) -> Done:
+    async def ddl(self, query: sql.Composable, *, no_tx: bool = False, **detail: DatabaseValue) -> Done:
         """Run an internal DDL statement and drop the metadata cache."""
         ctx: AbstractAsyncContextManager[Conn] = self.no_tx("this statement") if no_tx else self.tx()
         async with ctx as conn:

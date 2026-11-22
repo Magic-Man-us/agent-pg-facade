@@ -5,7 +5,7 @@ from pydantic import BaseModel, RootModel
 from pgfacade.contracts.enums import Operation, OperationHint
 from pgfacade.contracts.types import ResultText
 from pgfacade.shared.config import COLLECTION_CONFIG, CONTRACT_CONFIG
-from pgfacade.shared.types import HttpRoutePath, OperationSummary, PermissionFlags, SecurityFlag
+from pgfacade.shared.types import HttpRoutePath, OperationSummary, PermissionFlags
 
 
 class OperationDiscoveryRequest(BaseModel):
@@ -33,5 +33,5 @@ class LivenessRequest(BaseModel):
 class LivenessResponse(BaseModel):
     model_config = CONTRACT_CONFIG
 
-    ok: SecurityFlag
+    ok: bool
     message: ResultText | None = None

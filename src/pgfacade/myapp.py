@@ -25,13 +25,12 @@ from pgfacade.contracts.lifecycle import LifecycleList, LifecycleListInput, Life
 from pgfacade.contracts.requests import REQUEST_TYPES, Batch, BatchResult, Request
 from pgfacade.contracts.streaming import EventStreamRequest, EventStreamResponse
 from pgfacade.infrastructure.postgres.engine import Core
-from pgfacade.shared.types import SecurityFlag
 
 log = logging.getLogger("pgfacade")
 _NONTRANSACTIONAL_OPERATIONS = frozenset({Operation.MAINT_BACKEND, Operation.QUERY_RELOAD})
 
 
-def _requires_autocommit(request: Request, spec: OpSpec) -> SecurityFlag:
+def _requires_autocommit(request: Request, spec: OpSpec) -> bool:
     return (
         spec.perm.migrate
         or spec.op in _NONTRANSACTIONAL_OPERATIONS
