@@ -27,7 +27,7 @@ from pgfacade.contracts.enums import (
     WatchEvent,
 )
 from pgfacade.contracts.events import EventWatchInput
-from pgfacade.contracts.lifecycle import LifecycleRowTtlInput
+from pgfacade.contracts.lifecycle import DeleteRows, LifecycleRowTtlInput, RowAgeInput
 from pgfacade.contracts.queries import QueryParam
 from pgfacade.contracts.roles import PrivilegeInfo
 from pgfacade.contracts.rows import RowsSelect
@@ -54,7 +54,8 @@ def test_default_choices_are_enum_members_without_call_site_coercion() -> None:
     assert OrderBy(column="score", nulls="last").nulls is NullOrder.LAST
     assert EventWatchInput(table="items").events == [WatchEvent.INSERT, WatchEvent.UPDATE, WatchEvent.DELETE]
     assert all(isinstance(event, WatchEvent) for event in EventWatchInput(table="items").events)
-    assert LifecycleRowTtlInput(table="items", column="created_at", ttl="7 days").action is LifecycleAction.DELETE
+    assert LifecycleRowTtlInput(table="items", expiry=RowAgeInput(column="created_at", ttl="7 days")).action == DeleteRows()
+    assert DeleteRows().kind is LifecycleAction.DELETE
     assert ForeignRef(table="parent", column="id", on_delete="cascade").on_delete is OnDelete.CASCADE
 
 

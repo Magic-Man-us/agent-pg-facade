@@ -64,13 +64,13 @@ A tool that needs several capabilities needs all of them.
 |---|---|---|---|---|
 | `pg_lifecycle_install` | write, admin | none | `Done` | Create the _pgfacade schema, policy table, and run_lifecycle() function (idempotent). |
 | `pg_lifecycle_list` | admin | none | `LifecyclePolicyList` | All policies with last run outcome. |
-| `pg_lifecycle_row_ttl` | write, admin | `table` (required), `column` (required), `ttl`, `action`, `archive_table`, `batch_size`, `add_column`, `enabled` | `RowTtlPolicy` | Expire rows once a timestamp column is older than ttl (or past, when ttl is null): delete them or move them to an archive. |
-| `pg_lifecycle_table_expiry` | write, admin | `table` (required), `expires_at`, `expires_in`, `action`, `enabled` | `TableExpiryPolicy` | Truncate or drop a whole table at a point in time (or after an interval from now). |
+| `pg_lifecycle_row_ttl` | write, admin | `table` (required), `expiry` (required: `{"kind": "age", "column", "ttl", "add_column"}` or `{"kind": "deadline", "column"}`), `action` (`{"kind": "delete"}` or `{"kind": "archive", "table"}`), `batch_size`, `enabled` | `RowTtlPolicy` | Expire rows by age (column older than ttl) or by a per-row deadline column: delete them or move them to an archive. |
+| `pg_lifecycle_table_expiry` | write, admin | `table` (required), `expiry` (required: `{"kind": "at", "time"}` or `{"kind": "in", "interval"}`), `action`, `enabled` | `TableExpiryPolicy` | Truncate or drop a whole table at a point in time (or after an interval from now). |
 | `pg_lifecycle_preview` | admin | `policy_id` (required) | `Count` | Count the rows a policy would touch right now, without changing anything. |
 | `pg_lifecycle_remove` | write, admin | `policy_id` (required) | `Done` | Delete a policy by id. |
-| `pg_lifecycle_run` | write, admin | `policy_id` | `LifecycleRunReport` | Apply one policy (or all) now. |
+| `pg_lifecycle_run` | write, admin | `target` (required: `{"kind": "all"}` or `{"kind": "policy", "policy_id"}`) | `LifecycleRunReport` | Apply one policy, or every enabled policy, now. |
 | `pg_lifecycle_runs` | admin | `policy_id`, `limit` | `LifecycleRunList` | Run history, newest first (kept for 30 days). |
-| `pg_lifecycle_schedule` | write, admin | `cron` | `Done` | Schedule run_lifecycle() in pg_cron (cron expression), or unschedule with null. |
+| `pg_lifecycle_schedule` | write, admin | `schedule` (required: `{"kind": "cron", "expression"}` or `{"kind": "off"}`) | `Done` | Schedule run_lifecycle() in pg_cron with a cron expression, or remove the schedule. |
 
 ## migration
 

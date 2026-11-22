@@ -3,16 +3,28 @@
 Postgres has no native row TTL. Policies are stored in `_pgfacade.lifecycle_policies` and applied
 by the SQL function `_pgfacade.run_lifecycle()`, which the in-process sweeper calls on an interval
 and which pg_cron can call when available (lifecycle.schedule).
+
+Every choice between alternatives is a union discriminated by `kind`: how rows expire, what happens
+to them, when a table expires, which policies a run covers, and whether a pg_cron schedule exists.
 """
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Self
+from collections.abc import Mapping
+from typing import Annotated, Literal
 
-from pydantic import AliasChoices, Field, TypeAdapter, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from pgfacade.contracts.base import Contract, Count, Done, Interval, Name, RequestContract, TableName
-from pgfacade.contracts.enums import LifecycleAction, LifecycleKind, Operation
+from pgfacade.contracts.enums import (
+    ExpiryTimeKind,
+    LifecycleAction,
+    LifecycleKind,
+    LifecycleScheduleKind,
+    LifecycleTargetKind,
+    Operation,
+    RowExpiryKind,
+)
 from pgfacade.contracts.types import (
     CronExpression,
     DatabaseInterval,
@@ -29,18 +41,137 @@ from pgfacade.contracts.types import (
 )
 from pgfacade.shared.config import SOURCE_CONFIG
 
-RowAction = Literal[LifecycleAction.DELETE, LifecycleAction.ARCHIVE]
+TableAction = Literal[LifecycleAction.TRUNCATE, LifecycleAction.DROP]
 
 
-class _LifecyclePolicy(Contract):
+# ---------------------------------------------------------------- row expiry and disposal
+
+
+class RowAge(Contract):
+    """Rows expire once `column` is older than `ttl`."""
+
+    kind: Literal[RowExpiryKind.AGE] = RowExpiryKind.AGE
+    column: ResultLabel
+    ttl: DatabaseInterval
+
+
+class RowDeadline(Contract):
+    """Rows expire once the time stored in `column` has passed."""
+
+    kind: Literal[RowExpiryKind.DEADLINE] = RowExpiryKind.DEADLINE
+    column: ResultLabel
+
+
+RowExpiry = Annotated[RowAge | RowDeadline, Field(discriminator="kind")]
+
+
+class RowAgeInput(Contract):
+    """Rows expire once `column` is older than `ttl`."""
+
+    kind: Literal[RowExpiryKind.AGE] = RowExpiryKind.AGE
+    column: Name = Field(description="timestamp, timestamptz or date column, e.g. created_at")
+    ttl: Interval
+    add_column: OperationFlag = Field(False, description="Add the column if missing (timestamptz NOT NULL DEFAULT now())")
+
+
+class RowDeadlineInput(Contract):
+    """Rows expire once the time stored in `column` has passed."""
+
+    kind: Literal[RowExpiryKind.DEADLINE] = RowExpiryKind.DEADLINE
+    column: Name = Field(description="timestamp, timestamptz or date column holding each row's expiry time, e.g. expires_at")
+
+
+RowExpiryInput = Annotated[RowAgeInput | RowDeadlineInput, Field(discriminator="kind")]
+
+
+class DeleteRows(Contract):
+    """Expired rows are deleted."""
+
+    kind: Literal[LifecycleAction.DELETE] = LifecycleAction.DELETE
+
+
+class ArchiveRows(Contract):
+    """Expired rows are moved to `table`."""
+
+    kind: Literal[LifecycleAction.ARCHIVE] = LifecycleAction.ARCHIVE
+    table: ResultText
+
+
+RowAction = Annotated[DeleteRows | ArchiveRows, Field(discriminator="kind")]
+
+
+class ArchiveRowsInput(Contract):
+    """Expired rows are moved to an archive table."""
+
+    kind: Literal[LifecycleAction.ARCHIVE] = LifecycleAction.ARCHIVE
+    table: TableName | None = Field(None, description="Defaults to <table>_archive; created if missing")
+
+
+RowActionInput = Annotated[DeleteRows | ArchiveRowsInput, Field(discriminator="kind")]
+
+
+# ---------------------------------------------------------------- table expiry time
+
+
+class ExpiresAt(Contract):
+    """The table expires at a fixed time."""
+
+    kind: Literal[ExpiryTimeKind.AT] = ExpiryTimeKind.AT
+    time: EventDateTime
+
+
+class ExpiresIn(Contract):
+    """The table expires once an interval, counted from now, has passed."""
+
+    kind: Literal[ExpiryTimeKind.IN] = ExpiryTimeKind.IN
+    interval: Interval
+
+
+TableExpiryTime = Annotated[ExpiresAt | ExpiresIn, Field(discriminator="kind")]
+
+
+# ---------------------------------------------------------------- run target and schedule
+
+
+class AllPolicies(Contract):
+    """Every enabled policy."""
+
+    kind: Literal[LifecycleTargetKind.ALL] = LifecycleTargetKind.ALL
+
+
+class OnePolicy(Contract):
+    kind: Literal[LifecycleTargetKind.POLICY] = LifecycleTargetKind.POLICY
+    policy_id: LifecyclePolicyId
+
+
+RunTarget = Annotated[AllPolicies | OnePolicy, Field(discriminator="kind")]
+
+
+class CronSchedule(Contract):
+    """pg_cron runs run_lifecycle() on this expression."""
+
+    kind: Literal[LifecycleScheduleKind.CRON] = LifecycleScheduleKind.CRON
+    expression: CronExpression = Field(description="e.g. '*/5 * * * *'")
+
+
+class NoSchedule(Contract):
+    """No pg_cron job; only the in-process sweeper applies policies."""
+
+    kind: Literal[LifecycleScheduleKind.OFF] = LifecycleScheduleKind.OFF
+
+
+SweepSchedule = Annotated[CronSchedule | NoSchedule, Field(discriminator="kind")]
+
+
+# ---------------------------------------------------------------- stored policies
+
+
+class _StoredPolicy(Contract):
+    """Bookkeeping every policy carries, whatever its kind."""
+
     id: LifecyclePolicyId
     schema_name: ResultLabel
     table_name: ResultLabel
-    column_name: ResultLabel | None = None
-    ttl: DatabaseInterval | None = None
-    expires_at: EventDateTime | None = None
-    archive_table: ResultText | None = None
-    batch_size: ResultCount
     enabled: OperationFlag
     created_at: EventDateTime
     last_run_at: EventDateTime | None = None
@@ -48,24 +179,68 @@ class _LifecyclePolicy(Contract):
     last_error: ResultText | None = None
 
 
-class RowTtlPolicy(_LifecyclePolicy):
-    kind: Literal[LifecycleKind.ROW_TTL] = LifecycleKind.ROW_TTL
+class _RowTtlRow(_StoredPolicy):
+    """A row_ttl row of _pgfacade.lifecycle_policies. The table is flat and holds every kind's columns."""
+
+    model_config = SOURCE_CONFIG
+
+    kind: Literal[LifecycleKind.ROW_TTL]
     column_name: ResultLabel
-    expires_at: None = None
-    action: RowAction
+    ttl: DatabaseInterval | None = None
+    action: Literal[LifecycleAction.DELETE, LifecycleAction.ARCHIVE]
+    archive_table: ResultText | None = None
+    batch_size: ResultCount
 
     @property
-    def expiry_column(self) -> ResultLabel:
-        return self.column_name
+    def expiry(self) -> RowAge | RowDeadline:
+        return RowDeadline(column=self.column_name) if self.ttl is None else RowAge(column=self.column_name, ttl=self.ttl)
+
+    @property
+    def disposal(self) -> DeleteRows | ArchiveRows:
+        if self.action == LifecycleAction.DELETE:
+            return DeleteRows()
+        return ArchiveRows.model_validate({"table": self.archive_table})
 
 
-class TableExpiryPolicy(_LifecyclePolicy):
+class _TableExpiryRow(_StoredPolicy):
+    """A table_expiry row of _pgfacade.lifecycle_policies."""
+
+    model_config = SOURCE_CONFIG
+
+    kind: Literal[LifecycleKind.TABLE_EXPIRY]
+    expires_at: EventDateTime
+    action: TableAction
+
+
+def _is_table_row(value: object) -> bool:
+    return isinstance(value, Mapping) and "column_name" in value
+
+
+class RowTtlPolicy(_StoredPolicy):
+    kind: Literal[LifecycleKind.ROW_TTL] = LifecycleKind.ROW_TTL
+    expiry: RowExpiry
+    action: RowAction
+    batch_size: ResultCount
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_database_row(cls, value: object) -> object:
+        if _is_table_row(value):
+            row = _RowTtlRow.model_validate(value)
+            stored = row.model_dump(exclude={"column_name", "ttl", "archive_table"})
+            return stored | {"expiry": row.expiry, "action": row.disposal}
+        return value
+
+
+class TableExpiryPolicy(_StoredPolicy):
     kind: Literal[LifecycleKind.TABLE_EXPIRY] = LifecycleKind.TABLE_EXPIRY
     expires_at: EventDateTime
-    column_name: None = None
-    ttl: None = None
-    archive_table: None = None
-    action: Literal[LifecycleAction.TRUNCATE, LifecycleAction.DROP]
+    action: TableAction
+
+    @model_validator(mode="before")
+    @classmethod
+    def read_database_row(cls, value: object) -> object:
+        return _TableExpiryRow.model_validate(value).model_dump() if _is_table_row(value) else value
 
 
 LifecyclePolicy = Annotated[RowTtlPolicy | TableExpiryPolicy, Field(discriminator="kind")]
@@ -75,7 +250,7 @@ LIFECYCLE_POLICY_ADAPTER = TypeAdapter(LifecyclePolicy)
 class LifecyclePolicyList(Contract):
     items: list[LifecyclePolicy]
     installed: OperationFlag
-    scheduled: CronExpression | None = Field(None, description="pg_cron schedule when one exists")
+    schedule: SweepSchedule = Field(default_factory=NoSchedule, description="pg_cron schedule of run_lifecycle()")
 
 
 class LifecycleRunOutcome(Contract):
@@ -103,6 +278,9 @@ class LifecycleRunList(Contract):
     items: list[LifecycleRunRecord]
 
 
+# ---------------------------------------------------------------- requests
+
+
 class LifecycleInstallInput(Contract):
     pass
 
@@ -127,19 +305,14 @@ class LifecycleList(RequestContract[LifecyclePolicyList]):
 
 class LifecycleRowTtlInput(Contract):
     table: TableName
-    column: Name = Field(description="timestamp/timestamptz column, e.g. created_at or expires_at")
-    ttl: Interval | None = Field(None, description="Age after which rows expire; null means the column itself is the expiry time")
-    action: RowAction = Field(LifecycleAction.DELETE, description="delete rows, or archive them (move to archive_table before deleting)")
-    archive_table: TableName | None = Field(None, description="archive only: defaults to <table>_archive, created if missing")
+    expiry: RowExpiryInput
+    action: RowActionInput = Field(default_factory=DeleteRows)
     batch_size: LifecycleBatchSize = 5_000
-    add_column: OperationFlag = Field(
-        False, description="Add the column if missing (timestamptz DEFAULT now(), or now()+ttl for expiry columns)"
-    )
     enabled: OperationFlag = True
 
 
 class LifecycleRowTtl(RequestContract[RowTtlPolicy]):
-    """Expire rows once a timestamp column is older than ttl (or past, when ttl is null): delete them or move them to an archive."""
+    """Expire rows by age (column older than ttl) or by a per-row deadline column: delete them or move them to an archive."""
 
     kind: Literal[Operation.LIFECYCLE_ROW_TTL] = Operation.LIFECYCLE_ROW_TTL
     input: LifecycleRowTtlInput
@@ -147,16 +320,9 @@ class LifecycleRowTtl(RequestContract[RowTtlPolicy]):
 
 class LifecycleTableExpiryInput(Contract):
     table: TableName
-    expires_at: EventDateTime | None = None
-    expires_in: Interval | None = None
-    action: Literal[LifecycleAction.TRUNCATE, LifecycleAction.DROP] = LifecycleAction.TRUNCATE
+    expiry: TableExpiryTime
+    action: TableAction = LifecycleAction.TRUNCATE
     enabled: OperationFlag = True
-
-    @model_validator(mode="after")
-    def validate_expiry_input(self) -> Self:
-        if (self.expires_at is None) == (self.expires_in is None):
-            raise ValueError("pass exactly one of expires_at or expires_in")
-        return self
 
 
 class LifecycleTableExpiry(RequestContract[TableExpiryPolicy]):
@@ -178,11 +344,11 @@ class LifecycleRemove(RequestContract[Done]):
 
 
 class LifecycleRunInput(Contract):
-    policy_id: LifecyclePolicyId | None = None
+    target: RunTarget
 
 
 class LifecycleRun(RequestContract[LifecycleRunReport]):
-    """Apply one policy (or all) now."""
+    """Apply one policy, or every enabled policy, now."""
 
     kind: Literal[Operation.LIFECYCLE_RUN] = Operation.LIFECYCLE_RUN
     input: LifecycleRunInput
@@ -212,26 +378,11 @@ class LifecycleRuns(RequestContract[LifecycleRunList]):
 
 
 class LifecycleScheduleInput(Contract):
-    cron: CronExpression | None = Field(None, description="e.g. '*/5 * * * *'; null removes the job")
+    schedule: SweepSchedule
 
 
 class LifecycleSchedule(RequestContract[Done]):
-    """Schedule run_lifecycle() in pg_cron (cron expression), or unschedule with null."""
+    """Schedule run_lifecycle() in pg_cron with a cron expression, or remove the schedule."""
 
     kind: Literal[Operation.LIFECYCLE_SCHEDULE] = Operation.LIFECYCLE_SCHEDULE
     input: LifecycleScheduleInput
-
-
-class LifecyclePolicyWrite(Contract):
-    model_config = SOURCE_CONFIG
-
-    kind: LifecycleKind
-    schema_name: Name
-    table_name: Name
-    column_name: Name | None = Field(default=None, validation_alias=AliasChoices("column_name", "column"))
-    ttl: Interval | None = None
-    expires_at: EventDateTime | None = None
-    action: LifecycleAction
-    archive_table: TableName | None = None
-    batch_size: LifecycleBatchSize = 1
-    enabled: OperationFlag = True

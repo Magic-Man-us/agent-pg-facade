@@ -28,7 +28,15 @@ from pgfacade.contracts.base import Contract, Count, Done, Flag, QueryResult, Re
 from pgfacade.contracts.enums import Operation
 from pgfacade.contracts.envelopes import Failure, Success
 from pgfacade.contracts.events import NotificationList, WatchInfo, WatchInfoList
-from pgfacade.contracts.lifecycle import LifecyclePolicyList, LifecycleRunList, LifecycleRunReport, RowTtlPolicy, TableExpiryPolicy
+from pgfacade.contracts.lifecycle import (
+    DeleteRows,
+    LifecyclePolicyList,
+    LifecycleRunList,
+    LifecycleRunReport,
+    RowDeadline,
+    RowTtlPolicy,
+    TableExpiryPolicy,
+)
 from pgfacade.contracts.queries import QueryInfoList
 from pgfacade.contracts.requests import BatchResult
 from pgfacade.contracts.roles import PrivilegeInfoList, RoleInfo, RoleInfoList
@@ -84,6 +92,10 @@ _INPUT_OVERRIDES: dict[Operation, dict[str, JsonValue]] = {
     Operation.COLUMN_ALTER: {"type": "text"},
     Operation.CONSTRAINT_ADD: {"kind": "unique", "columns": ["value"]},
     Operation.ROLE_ALTER: {"login": True},
+    Operation.LIFECYCLE_ROW_TTL: {"expiry": {"kind": "age", "column": "created_at", "ttl": "1 day"}},
+    Operation.LIFECYCLE_TABLE_EXPIRY: {"expiry": {"kind": "in", "interval": "1 day"}},
+    Operation.LIFECYCLE_RUN: {"target": {"kind": "all"}},
+    Operation.LIFECYCLE_SCHEDULE: {"schedule": {"kind": "off"}},
 }
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _RESULTS: tuple[Contract, ...] = (
@@ -99,8 +111,8 @@ _RESULTS: tuple[Contract, ...] = (
         kind="row_ttl",
         schema_name="public",
         table_name="items",
-        column_name="created_at",
-        action="delete",
+        expiry=RowDeadline(column="created_at"),
+        action=DeleteRows(),
         batch_size=1,
         enabled=True,
         created_at=_NOW,
@@ -111,7 +123,6 @@ _RESULTS: tuple[Contract, ...] = (
         table_name="items",
         action="truncate",
         expires_at=_NOW,
-        batch_size=1,
         enabled=True,
         created_at=_NOW,
     ),
@@ -184,10 +195,9 @@ def sample_request(spec: OpSpec) -> RequestContract[Contract]:
         return spec.request.model_validate({"input": {"table": "items", "kind": "unique", "columns": ["value"]}})
     input_model = spec.request.model_fields["input"].annotation
     assert isinstance(input_model, type) and issubclass(input_model, Contract)
-    values = {name: _INPUT_VALUES[name] for name, field in input_model.model_fields.items() if field.is_required()}
-    values.update(_INPUT_OVERRIDES.get(spec.op, {}))
-    if spec.op == Operation.LIFECYCLE_TABLE_EXPIRY:
-        values["expires_in"] = "1 day"
+    overrides = _INPUT_OVERRIDES.get(spec.op, {})
+    required = (name for name, field in input_model.model_fields.items() if field.is_required() and name not in overrides)
+    values = {name: _INPUT_VALUES[name] for name in required} | overrides
     if spec.op == Operation.MAINT_BACKEND:
         values["action"] = "cancel"
     request = spec.request.model_validate({"input": values})

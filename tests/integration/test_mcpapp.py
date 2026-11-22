@@ -117,10 +117,12 @@ async def test_ddl_roles_and_lifecycle_tools(mcp: Client, users: str) -> None:
     finally:
         await call_tool(mcp, "pg_role_drop", name=role, reassign_to="postgres")
     await call_tool(mcp, "pg_lifecycle_install")
-    policy = await call_tool(mcp, "pg_lifecycle_row_ttl", table=users, column="created_at", ttl="30 days")
+    policy = await call_tool(mcp, "pg_lifecycle_row_ttl", table=users, expiry={"kind": "age", "column": "created_at", "ttl": "30 days"})
     try:
         assert (await call_tool(mcp, "pg_lifecycle_preview", policy_id=policy["id"]))["count"] == 0
-        assert (await call_tool(mcp, "pg_lifecycle_run", policy_id=policy["id"]))["items"][0]["rows_affected"] == 0
+        assert (await call_tool(mcp, "pg_lifecycle_run", target={"kind": "policy", "policy_id": policy["id"]}))["items"][0][
+            "rows_affected"
+        ] == 0
         assert (await call_tool(mcp, "pg_lifecycle_runs", policy_id=policy["id"]))["items"]
     finally:
         await call_tool(mcp, "pg_lifecycle_remove", policy_id=policy["id"])
