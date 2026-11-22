@@ -41,3 +41,16 @@ async def test_batch_schema_keeps_the_request_envelope_shape() -> None:
     parameters = (await server.get_tool("pg_batch_run")).parameters
     assert parameters["required"] == ["request"]
     assert set(parameters["properties"]) == {"request"}
+
+
+@pytest.mark.parametrize(("flags", "read_only"), [({"read_only": True}, True), ({}, False)], ids=["read-only", "default"])
+async def test_batch_hints_follow_what_the_server_exposes(flags: dict[str, bool], read_only: bool) -> None:
+    hints = (await create_mcp(PgSettings(_env_file=None, **flags)).get_tool("pg_batch_run")).annotations
+    assert hints is not None
+    assert (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint) == (read_only, not read_only, read_only)
+
+
+async def test_scheduling_row_expiry_is_marked_destructive() -> None:
+    server = create_mcp(PgSettings(_env_file=None, **_FULL_ACCESS))
+    hints = (await server.get_tool("pg_lifecycle_schedule")).annotations
+    assert hints is not None and hints.destructiveHint is True and hints.readOnlyHint is False
