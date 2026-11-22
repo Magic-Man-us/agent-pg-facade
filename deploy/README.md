@@ -44,6 +44,20 @@ sudo journalctl -u pgfacade.service -n 30 --no-pager
 
 `/healthz` is public local liveness metadata. For authenticated readiness, send `{"kind":"server.health","input":{}}` to `/call` or POST `/server/health`.
 
+## Read the database from a local MCP session
+
+[operator.sql](operator.sql) adds an optional `pgfacade_operator` login. It inherits `pgfacade_reader`, has no password, defaults to read-only transactions, and can connect only to the `pgfacade` database. One OS account is mapped to it through peer authentication. `check-host` accepts this login and rejects any other attribute, membership, or database on it.
+
+```sh
+sudo -u postgres psql -X -f deploy/operator.sql
+echo "operator $USER pgfacade_operator" | sudo tee -a /etc/postgresql/16/main/pg_ident.conf
+echo 'local pgfacade pgfacade_operator peer map=operator' | sudo tee -a /etc/postgresql/16/main/pg_hba.conf
+sudo systemctl reload postgresql@16-main.service
+sudo bash deploy/check-host
+```
+
+Connect with `PGFACADE_DSN='postgresql://pgfacade_operator@/pgfacade?host=/var/run/postgresql'` and `PGFACADE_READ_ONLY=true`.
+
 ## Use the API
 
 Provision a unique key for each application or person. Map ordinary clients to `pgfacade_reader` with `read_only=true`, or to `pgfacade_writer` for row changes. Leave SQL, DDL, admin, migration, and notification flags false. The reader/writer bootstrap keys are administrative verification credentials; do not distribute one shared writer key to every application.

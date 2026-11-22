@@ -50,7 +50,7 @@ Live acceptance checks cover:
 - Missing/wrong keys, raw SQL, DDL, role management, migrations, notifications, SSE, diagnostics, lifecycle, and oversized requests denied.
 - The listener is exactly 127.0.0.1:8765 and owned by the systemd main process; PostgreSQL has no TCP listener.
 - Individual service startup status, sandbox settings, installed-unit equality, system interpreter, root ownership, and credential metadata.
-- Exact PostgreSQL peer/HBA policy, passwordless connector, restricted role attributes/memberships, no runtime object ownership or schema CREATE, and no PUBLIC database CONNECT/TEMP.
+- Exact PostgreSQL peer/HBA policy, passwordless connector, restricted role attributes/memberships, no runtime object ownership or schema CREATE, and no PUBLIC database CONNECT/TEMP. The optional `pgfacade_operator` login is accepted only when passwordless, unprivileged, a member of `pgfacade_reader` alone, and limited to the `pgfacade` database.
 - Recent successful encrypted backups and minimum disk reserve.
 
 Live grant checks additionally exercised a disposable owner-created table: reader writes were denied by PostgreSQL itself, writer rows were visible to the reader, forbidden mixed batches made no changes, other databases rejected the connector, the wrong OS user failed peer authentication, and server-file/program privileges were denied. Service and PostgreSQL restart recovery were exercised; a full machine reboot was not performed.

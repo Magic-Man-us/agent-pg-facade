@@ -84,7 +84,19 @@ SELECT
         WHERE auth_method <> 'reject'
           AND NOT (type = 'local' AND auth_method = 'peer' AND user_name = ARRAY['postgres'])
           AND NOT (type = 'local' AND auth_method = 'peer' AND user_name = ARRAY['pgfacade'] AND database = ARRAY['pgfacade'])
+          AND NOT (type = 'local' AND auth_method = 'peer' AND user_name = ARRAY['pgfacade_operator'] AND database = ARRAY['pgfacade'])
     )
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_authid
+        WHERE rolname = 'pgfacade_operator'
+          AND (rolsuper OR rolcreatedb OR rolcreaterole OR rolreplication OR rolbypassrls OR rolpassword IS NOT NULL)
+    )
+    AND NOT EXISTS (
+        SELECT 1 FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.member
+        WHERE r.rolname = 'pgfacade_operator' AND (m.roleid <> 'pgfacade_reader'::regrole OR m.admin_option)
+    )
+    AND NOT EXISTS (SELECT 1 FROM pg_namespace n JOIN pg_roles r ON r.oid = n.nspowner WHERE r.rolname = 'pgfacade_operator')
+    AND NOT EXISTS (SELECT 1 FROM pg_class c JOIN pg_roles r ON r.oid = c.relowner WHERE r.rolname = 'pgfacade_operator')
     AND (SELECT count(*) = 4 AND bool_and(NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND rolcanlogin = (rolname = 'pgfacade'))
          FROM pg_roles WHERE rolname IN ('pgfacade', 'pgfacade_owner', 'pgfacade_reader', 'pgfacade_writer'))
     AND (SELECT count(*) = 2 AND bool_and(NOT admin_option AND NOT inherit_option AND set_option AND roleid IN ('pgfacade_reader'::regrole, 'pgfacade_writer'::regrole))
