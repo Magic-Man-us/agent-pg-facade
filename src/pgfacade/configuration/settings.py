@@ -12,7 +12,8 @@ can do. The connector must be a member of every mapped role:
 
 Per-principal flags are application-level guardrails on top. A key with `sql: true` can run arbitrary
 SQL as its role, which includes SET ROLE to any role the connector is a member of; give raw SQL
-only to keys you would trust with all of them. REST and MCP require API keys or an explicit access_control configuration.
+only to keys you would trust with all of them. REST and MCP over HTTP require API keys or an explicit access_control configuration.
+A stdio MCP session with neither configured runs as the connector user.
 Group policies bind verified identities to configured execution roles; identity sources
 currently provide only local mock records and a deny-all stub.
 """
