@@ -83,6 +83,10 @@ class Core:
         await self.close()
 
     @property
+    def is_open(self) -> bool:
+        return self._pool is not None
+
+    @property
     def pool(self) -> AsyncConnectionPool[Conn]:
         self._check_transaction_owner()
         if self._pool is None:

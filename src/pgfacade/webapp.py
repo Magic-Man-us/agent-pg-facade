@@ -20,7 +20,7 @@ from pgfacade.application.context import ExecutionContext
 from pgfacade.application.errors import PgFacadeError, RequestValidationFailure, error_payload
 from pgfacade.application.registry import OPERATIONS, OpSpec
 from pgfacade.application.types import ExecutionProvenance
-from pgfacade.authorization.providers import IdentityProvider, authenticate, configure_identity_provider
+from pgfacade.authorization.providers import IdentityProvider, authenticate
 from pgfacade.configuration.settings import PgSettings
 from pgfacade.contracts.base import Contract, RequestContract
 from pgfacade.contracts.discovery import LivenessRequest, LivenessResponse, OperationDiscoveryRequest, OperationDiscoveryResponse, OpInfo
@@ -29,8 +29,8 @@ from pgfacade.contracts.protocol import StreamEvent
 from pgfacade.contracts.requests import Request as RequestUnion
 from pgfacade.contracts.streaming import EventStreamRequest
 from pgfacade.facade import PgFacade
-from pgfacade.infrastructure.startup import startup_command
 from pgfacade.presentation.middleware import RequestBodyLimit
+from pgfacade.presentation.runtime import server_runtime
 from pgfacade.shared.types import (
     EventChannelList,
     EventStreamChunk,
@@ -106,24 +106,18 @@ def build_router() -> APIRouter:
 def create_app(
     settings: PgSettings | None = None, db: PgFacade | None = None, identity_provider: IdentityProvider | None = None
 ) -> FastAPI:
-    settings = settings or (db.settings if db is not None else PgSettings())
-    if not settings.auth_enabled:
-        raise ValueError("API keys or access_control must be configured before starting a server")
-    if db is not None and db.settings != settings:
-        raise ValueError("The supplied application must use the server settings")
-    provider = configure_identity_provider(settings, identity_provider)
-    db = db or PgFacade(settings)
+    runtime = server_runtime(settings, db, identity_provider, require_auth=True)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        async with startup_command(settings.startup_command), db:
+        async with runtime.running():
             yield
 
     app = FastAPI(title="pgfacade", version=__version__, lifespan=lifespan, responses=_ERROR_RESPONSES, redirect_slashes=False)
-    app.add_middleware(RequestBodyLimit, max_bytes=settings.max_request_bytes, timeout_s=settings.request_read_timeout_s)
-    app.state.settings = settings
-    app.state.db = db
-    app.state.identity_provider = provider
+    app.add_middleware(RequestBodyLimit, max_bytes=runtime.settings.max_request_bytes, timeout_s=runtime.settings.request_read_timeout_s)
+    app.state.settings = runtime.settings
+    app.state.db = runtime.db
+    app.state.identity_provider = runtime.identity_provider
 
     @app.exception_handler(Exception)
     @app.exception_handler(HTTPException)
@@ -140,7 +134,7 @@ def create_app(
 
     @app.get("/healthz", tags=["server"], include_in_schema=False)
     async def healthz(request: Annotated[LivenessRequest, Query()]) -> LivenessResponse:
-        return LivenessResponse(ok=db._pool is not None)
+        return LivenessResponse(ok=runtime.db.is_open)
 
     @app.get("/ops", tags=["server"])
     async def ops(app: Application, context: Context, request: Annotated[OperationDiscoveryRequest, Query()]) -> OperationDiscoveryResponse:
