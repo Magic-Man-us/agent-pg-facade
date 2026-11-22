@@ -133,3 +133,15 @@ async def test_errors_become_tool_errors(mcp: Client, users: str) -> None:
         await call_tool(mcp, "pg_rows_delete", table=users)
     with pytest.raises(ToolError, match="does not exist"):
         await call_tool(mcp, "pg_rows_select", table="nope")
+
+
+async def test_keyless_session_lists_tables_in_its_instructions(users: str) -> None:
+    async with Client(create_mcp(make_settings(keys={}, mcp_key=None))) as client:
+        assert client.instructions is not None and f"public.{users}" in client.instructions
+        assert (await call_tool(client, "pg_server_whoami"))["principal"] == "library"
+        assert (await call_tool(client, "pg_rows_count", table=users))["count"] == 3
+
+
+async def test_keyed_session_instructions_omit_tables(users: str) -> None:
+    async with Client(create_mcp(make_settings())) as client:
+        assert client.instructions is not None and users not in client.instructions

@@ -1,0 +1,27 @@
+{
+  "name": "pg-facade",
+  "version": "0.5.0",
+  "description": "Typed PostgreSQL tools over MCP, read-only by default, with a skill for querying efficiently",
+  "author": {
+    "name": "Magic-Man"
+  },
+  "homepage": "https://github.com/Magic-Man-us/agent-pg-facade",
+  "repository": "https://github.com/Magic-Man-us/agent-pg-facade",
+  "license": "MIT",
+  "keywords": ["postgres", "postgresql", "database", "sql", "mcp"],
+  "userConfig": {
+    "dsn": {
+      "type": "string",
+      "title": "PostgreSQL connection string",
+      "description": "For example postgresql://user:password@localhost:5432/mydb. The assistant acts as this database user.",
+      "required": true,
+      "sensitive": true
+    },
+    "read_only": {
+      "type": "boolean",
+      "title": "Read-only",
+      "description": "Expose only read tools and run every transaction read-only. Turn off to add the row write tools.",
+      "default": true
+    }
+  }
+}

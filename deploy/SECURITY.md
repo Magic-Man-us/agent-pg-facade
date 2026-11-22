@@ -20,7 +20,7 @@ Root, the PostgreSQL OS administrator, reviewed source, and custom query files a
 
 | Control | Category | Enforcement |
 |---|---|---|
-| Authentication is mandatory | CWE-306 | Factories reject missing authentication configuration; authenticated operations reject missing/wrong keys. |
+| Network authentication is mandatory | CWE-306 | Network factories reject missing authentication configuration; a stdio session without keys runs as the connector user; authenticated operations reject missing/wrong keys. |
 | Privileged capabilities are opt-in | CWE-250 | Optional capabilities default off; explicit principals required. |
 | MCP HTTP authenticates each request | CWE-287 | Explicit HTTP request context; HTTP tool calls never use the stdio key. |
 | Notification and diagnostic operations enforce their capability | CWE-862 | Send/listen/watch and diagnostic catalog operations enforce their capability. Discovery omits admin-only queries for restricted callers. |

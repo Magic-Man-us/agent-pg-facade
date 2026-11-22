@@ -1,0 +1,14 @@
+{
+  "name": "agent-pg-facade",
+  "description": "PGFacade: typed PostgreSQL tools for AI assistants",
+  "owner": {
+    "name": "Magic-Man"
+  },
+  "plugins": [
+    {
+      "name": "pg-facade",
+      "source": "./plugin",
+      "description": "Typed PostgreSQL tools over MCP, read-only by default, with a skill for querying efficiently"
+    }
+  ]
+}

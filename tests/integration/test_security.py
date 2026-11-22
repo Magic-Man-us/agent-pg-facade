@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.types import Message, Receive, Scope, Send
 
-from pgfacade import MyApp, PgSettings, Principal, Unauthenticated
+from pgfacade import ANONYMOUS, MyApp, PgSettings, Principal, Unauthenticated
 from pgfacade.application.errors import AuthenticationNotConfigured
 from pgfacade.authorization.credentials import resolve_principal
 from pgfacade.contracts.enums import ErrorCode, ErrorReason
@@ -16,7 +16,7 @@ from pgfacade.contracts.envelopes import Failure
 from pgfacade.contracts.queries import QueryRun, QueryRunInput
 from pgfacade.presentation.middleware import RequestBodyLimit
 from pgfacade.webapp import create_app
-from pgfacade.webmcp import create_mcp, resolve_mcp_context
+from pgfacade.webmcp import create_mcp, create_mcp_http_app, resolve_mcp_context
 from tests.support import fails, successful
 
 TEST_KEY = "security-test-bearer-key"
@@ -34,7 +34,7 @@ def test_default_capabilities_are_restricted() -> None:
     assert not Principal().ddl
 
 
-@pytest.mark.parametrize("factory", [create_app, create_mcp])
+@pytest.mark.parametrize("factory", [create_app, create_mcp_http_app])
 def test_network_factories_reject_missing_keys(factory: Callable) -> None:
     with pytest.raises(ValueError, match="API key"):
         factory(PgSettings(_env_file=None))
@@ -163,6 +163,35 @@ async def test_stdio_mcp_uses_configured_key(settings: PgSettings, monkeypatch: 
 
     monkeypatch.setattr("pgfacade.webmcp.get_http_request", no_request)
     assert (await resolve_mcp_context(settings)).principal.name == "writer"
+
+
+async def test_stdio_mcp_without_keys_runs_as_the_local_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+
+    def no_request() -> None:
+        raise RuntimeError("No active HTTP request found.")
+
+    monkeypatch.setattr("pgfacade.webmcp.get_http_request", no_request)
+    settings = PgSettings(_env_file=None)
+    create_mcp(settings)
+    assert (await resolve_mcp_context(settings)).principal == ANONYMOUS
+
+
+async def test_stdio_mcp_with_keys_still_requires_its_key(monkeypatch: pytest.MonkeyPatch) -> None:
+
+    def no_request() -> None:
+        raise RuntimeError("No active HTTP request found.")
+
+    monkeypatch.setattr("pgfacade.webmcp.get_http_request", no_request)
+    with pytest.raises(Unauthenticated, match="missing API key"):
+        await resolve_mcp_context(PgSettings(_env_file=None, keys={TEST_KEY: Principal(name="writer")}))
+
+
+@pytest.mark.parametrize("headers", [[], [(b"authorization", b"Bearer any-key")]])
+async def test_http_mcp_without_keys_is_never_local(headers: list[tuple[bytes, bytes]], monkeypatch: pytest.MonkeyPatch) -> None:
+    request = Request({"type": "http", "headers": headers})
+    monkeypatch.setattr("pgfacade.webmcp.get_http_request", lambda: request)
+    with pytest.raises(AuthenticationNotConfigured):
+        await resolve_mcp_context(PgSettings(_env_file=None))
 
 
 async def test_unexpected_mcp_context_failure_does_not_fallback(settings: PgSettings, monkeypatch: pytest.MonkeyPatch) -> None:

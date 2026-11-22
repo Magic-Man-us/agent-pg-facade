@@ -26,6 +26,7 @@ from pgfacade.configuration.settings import ANONYMOUS, PgSettings
 from pgfacade.contracts.base import Contract, RequestContract
 from pgfacade.contracts.enums import OperationHint
 from pgfacade.contracts.envelopes import Failure
+from pgfacade.contracts.schema import TableList, TableListInput
 from pgfacade.infrastructure.startup import startup_command
 from pgfacade.myapp import MyApp
 from pgfacade.presentation.middleware import RequestBodyLimit
@@ -44,6 +45,19 @@ Error results set isError. Reads are capped by max_rows; check `outcome.data.tru
 Use pg_batch_run for multi-step atomic changes, pg_query_run for curated diagnostics, and
 pg_migration_revision + pg_migration_run for schema changes in a tracked project.
 """
+
+
+_TABLE_SUMMARY_LIMIT = 50
+
+
+async def _table_summary(db: MyApp) -> str:
+    response = await db.call(TableList(input=TableListInput(limit=_TABLE_SUMMARY_LIMIT)))
+    if isinstance(response.outcome, Failure) or not response.outcome.data.items:
+        return ""
+    tables = response.outcome.data.items
+    lines = [f"{t.schema_name}.{t.name} (~{t.est_rows} rows)" if t.est_rows >= 0 else f"{t.schema_name}.{t.name}" for t in tables]
+    scope = f"first {_TABLE_SUMMARY_LIMIT} by name; pg_table_list returns all" if len(tables) == _TABLE_SUMMARY_LIMIT else "all"
+    return f"\nTables when this session started ({scope}):\n" + "\n".join(lines) + "\n"
 
 
 class _Errors(Middleware):
@@ -70,6 +84,9 @@ async def resolve_mcp_context(settings: PgSettings, provider: IdentityProvider |
     try:
         request = get_http_request()
     except RuntimeError:
+        if not settings.auth_enabled:
+            # A stdio session with no configured keys is the process owner, the same trust as a direct library call.
+            return ExecutionContext(principal=ANONYMOUS, provenance=ExecutionProvenance.MCP)
         key = settings.mcp_key.get_secret_value() if settings.mcp_key is not None else None
     else:
         key = bearer_token(dict(request.headers))
@@ -97,8 +114,6 @@ def _tool_for(spec: OpSpec, app: MyApp, resolve_context: Callable[[], Awaitable[
 
 def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, identity_provider: IdentityProvider | None = None) -> FastMCP:
     settings = settings or (db.settings if db is not None else PgSettings())
-    if not settings.auth_enabled:
-        raise ValueError("API keys or access_control must be configured before starting a server")
     if db is not None and db.settings != settings:
         raise ValueError("The supplied facade must use the server settings")
     provider = configure_identity_provider(settings, identity_provider)
@@ -108,6 +123,9 @@ def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, iden
     @asynccontextmanager
     async def lifespan(_: FastMCP) -> AsyncIterator[McpLifespanState]:
         async with startup_command(settings.startup_command), db:
+            if not settings.auth_enabled:
+                # Keyless sessions have one local principal, so its table list is safe to send before authentication.
+                mcp.instructions = INSTRUCTIONS + await _table_summary(db)
             yield {}
 
     mcp = FastMCP(
@@ -147,6 +165,8 @@ def create_mcp_http_app(
     transport: McpHttpTransport = McpTransport.HTTP,
 ) -> StarletteWithLifespan:
     settings = settings or (db.settings if db is not None else PgSettings())
+    if not settings.auth_enabled:
+        raise ValueError("API keys or access_control must be configured before starting a server")
     server = create_mcp(settings, db, identity_provider)
     middleware = ASGIMiddleware(RequestBodyLimit, max_bytes=settings.max_request_bytes, timeout_s=settings.request_read_timeout_s)
     return server.http_app(
