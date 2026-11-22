@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import inspect
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
+from typing import Annotated, Literal, Union
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import DisabledError, NotFoundError
@@ -10,9 +11,9 @@ from fastmcp.exceptions import ValidationError as ToolValidationError
 from fastmcp.server.dependencies import get_http_request
 from fastmcp.server.http import StarletteWithLifespan
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.tools import ToolResult
+from fastmcp.tools import Tool, ToolResult
 from mcp import types as mt
-from pydantic import ValidationError
+from pydantic import Field, JsonValue, ValidationError, create_model
 from starlette.middleware import Middleware as ASGIMiddleware
 
 from pgfacade import __version__
@@ -24,9 +25,11 @@ from pgfacade.authorization.credentials import bearer_token
 from pgfacade.authorization.providers import IdentityProvider, authenticate, configure_identity_provider
 from pgfacade.configuration.settings import ANONYMOUS, PgSettings
 from pgfacade.contracts.base import Contract, RequestContract
-from pgfacade.contracts.enums import OperationHint
+from pgfacade.contracts.enums import Operation, OperationHint
 from pgfacade.contracts.envelopes import Failure
+from pgfacade.contracts.requests import Batch
 from pgfacade.contracts.schema import TableList, TableListInput
+from pgfacade.contracts.types import NonEmptyItems
 from pgfacade.infrastructure.startup import startup_command
 from pgfacade.myapp import MyApp
 from pgfacade.presentation.middleware import RequestBodyLimit
@@ -112,6 +115,22 @@ def _tool_for(spec: OpSpec, app: MyApp, resolve_context: Callable[[], Awaitable[
     return tool
 
 
+def _batch_parameters(specs: Sequence[OpSpec]) -> dict[str, JsonValue]:
+    """Advertise only the operations this server exposes; the Batch contract embeds the whole catalog."""
+    children = tuple(spec.request for spec in specs if spec.op != Operation.BATCH_RUN)
+    # Pydantic builds a union from a runtime tuple only through typing.Union.
+    child = Annotated[Union[children], Field(discriminator="kind")]  # type: ignore[valid-type]  # noqa: UP007
+    batch_input = create_model("BatchInput", __base__=Contract, requests=(NonEmptyItems[child], ...))
+    batch = create_model(
+        "Batch",
+        __base__=Contract,
+        __doc__=Batch.__doc__,
+        kind=(Literal[Operation.BATCH_RUN], Operation.BATCH_RUN),  # type: ignore[arg-type]  # Runtime literal field.
+        input=(batch_input, ...),
+    )
+    return create_model("BatchArguments", __base__=Contract, request=(batch, ...)).model_json_schema()
+
+
 def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, identity_provider: IdentityProvider | None = None) -> FastMCP:
     settings = settings or (db.settings if db is not None else PgSettings())
     if db is not None and db.settings != settings:
@@ -140,8 +159,9 @@ def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, iden
     async def resolve_context() -> ExecutionContext:
         return await resolve_mcp_context(settings, provider)
 
-    for spec in db.allowed_ops(discovery):
-        mcp.tool(
+    specs = db.allowed_ops(discovery)
+    for spec in specs:
+        tool = Tool.from_function(
             _tool_for(spec, db, resolve_context),
             name=f"pg_{spec.area}_{spec.action}",
             annotations=mt.ToolAnnotations(
@@ -153,6 +173,9 @@ def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, iden
             tags={spec.area},
             output_schema=spec.envelope.model_json_schema(mode="serialization"),
         )
+        if spec.op == Operation.BATCH_RUN:
+            tool.parameters = _batch_parameters(specs)
+        mcp.add_tool(tool)
 
     return mcp
 
