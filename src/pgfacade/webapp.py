@@ -18,7 +18,7 @@ from starlette.exceptions import HTTPException
 from pgfacade import __version__
 from pgfacade.application.context import ExecutionContext
 from pgfacade.application.errors import PgFacadeError, RequestValidationFailure, error_payload
-from pgfacade.application.registry import REGISTRY, OpSpec
+from pgfacade.application.registry import OPERATIONS, OpSpec
 from pgfacade.application.types import ExecutionProvenance
 from pgfacade.authorization.providers import IdentityProvider, authenticate, configure_identity_provider
 from pgfacade.configuration.settings import PgSettings
@@ -28,8 +28,8 @@ from pgfacade.contracts.envelopes import Failure, ResponseEnvelope
 from pgfacade.contracts.protocol import StreamEvent
 from pgfacade.contracts.requests import Request as RequestUnion
 from pgfacade.contracts.streaming import EventStreamRequest
+from pgfacade.facade import PgFacade
 from pgfacade.infrastructure.startup import startup_command
-from pgfacade.myapp import MyApp
 from pgfacade.presentation.middleware import RequestBodyLimit
 from pgfacade.shared.types import (
     EventChannelList,
@@ -37,7 +37,7 @@ from pgfacade.shared.types import (
     HeartbeatSeconds,
 )
 
-OperationResponse = reduce(or_, (spec.envelope for spec in REGISTRY.values()))
+OperationResponse = reduce(or_, (spec.envelope for spec in OPERATIONS.values()))
 # FastAPI accepts heterogeneous OpenAPI response metadata at this framework boundary.
 _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
     status: {"model": Failure} for status in (400, 401, 403, 404, 405, 408, 409, 413, 422, 500, 502, 503)
@@ -46,7 +46,7 @@ _ERROR_RESPONSES: dict[int | str, dict[str, Any]] = {
 _bearer = HTTPBearer(auto_error=False, description="Bearer credential for the configured authentication source")
 
 
-def current_app(request: Request) -> MyApp:
+def current_app(request: Request) -> PgFacade:
     return request.app.state.db  # type: ignore[no-any-return]  # Starlette owns the untyped application-state container.
 
 
@@ -57,7 +57,7 @@ async def current_context(request: Request, cred: Annotated[HTTPAuthorizationCre
     return ExecutionContext(principal=principal, provenance=ExecutionProvenance.HTTP)
 
 
-Application = Annotated[MyApp, Depends(current_app)]
+Application = Annotated[PgFacade, Depends(current_app)]
 Context = Annotated[ExecutionContext, Depends(current_context)]
 
 
@@ -73,7 +73,7 @@ def _op_info(spec: OpSpec) -> OpInfo:
 
 def _route_for(
     spec: OpSpec,
-) -> Callable[[MyApp, ExecutionContext, RequestContract[Contract], Response], Awaitable[ResponseEnvelope[Contract]]]:
+) -> Callable[[PgFacade, ExecutionContext, RequestContract[Contract], Response], Awaitable[ResponseEnvelope[Contract]]]:
     async def endpoint(
         app: Application, context: Context, body: RequestContract[Contract], response: Response
     ) -> ResponseEnvelope[Contract]:
@@ -90,7 +90,7 @@ def _route_for(
 
 def build_router() -> APIRouter:
     router = APIRouter()
-    for spec in REGISTRY.values():
+    for spec in OPERATIONS.values():
         router.add_api_route(
             f"/{spec.area}/{spec.action}",
             _route_for(spec),
@@ -103,14 +103,16 @@ def build_router() -> APIRouter:
     return router
 
 
-def create_app(settings: PgSettings | None = None, db: MyApp | None = None, identity_provider: IdentityProvider | None = None) -> FastAPI:
+def create_app(
+    settings: PgSettings | None = None, db: PgFacade | None = None, identity_provider: IdentityProvider | None = None
+) -> FastAPI:
     settings = settings or (db.settings if db is not None else PgSettings())
     if not settings.auth_enabled:
         raise ValueError("API keys or access_control must be configured before starting a server")
     if db is not None and db.settings != settings:
         raise ValueError("The supplied application must use the server settings")
     provider = configure_identity_provider(settings, identity_provider)
-    db = db or MyApp(settings)
+    db = db or PgFacade(settings)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:

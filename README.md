@@ -148,10 +148,10 @@ A connector that can switch between several roles holds their combined authority
 ## Python
 
 ```python
-from pgfacade import ExecutionContext, MyApp, PgSettings, Success
+from pgfacade import ExecutionContext, PgFacade, PgSettings, Success
 from pgfacade.contracts.rows import RowsSelect, RowsSelectInput
 
-async with MyApp(PgSettings()) as app:
+async with PgFacade(PgSettings()) as app:
     request = RowsSelect(input=RowsSelectInput(table="app.notes", limit=20))
     response = await app.call(request, ExecutionContext())
     if isinstance(response.outcome, Success):
@@ -188,7 +188,7 @@ Before updating the running service:
 
 ## Code map
 
-`MyApp`, defined in [myapp.py](src/pgfacade/myapp.py), applies shared policy and dispatches concrete requests through `functools.singledispatchmethod`. [webmcp.py](src/pgfacade/webmcp.py) owns the FastMCP server; [webapp.py](src/pgfacade/webapp.py) owns the FastAPI application; CLI and middleware live in presentation; PostgreSQL and process resources live in infrastructure. Import the public facade, settings, enums, and envelopes from `pgfacade`; use the owning package for specialized models and integrations.
+`PgFacade`, defined in [facade.py](src/pgfacade/facade.py), applies shared policy and runs the handler that the `OPERATIONS` catalog in [registry.py](src/pgfacade/application/registry.py) holds for the request's `kind`. [webmcp.py](src/pgfacade/webmcp.py) owns the FastMCP server; [webapp.py](src/pgfacade/webapp.py) owns the FastAPI application; CLI and middleware live in presentation; PostgreSQL and process resources live in infrastructure. Import the public facade, settings, enums, and envelopes from `pgfacade`; use the owning package for specialized models and integrations.
 
 | Path | Responsibility |
 |---|---|

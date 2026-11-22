@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pgfacade import MyApp
+from pgfacade import PgFacade
 from pgfacade.contracts.queries import QueryRun, QueryRunInput
 from pgfacade.contracts.rows import RowsInsert, RowsInsertInput, RowsSelect, RowsSelectInput
 from pgfacade.contracts.schema import ColumnSpec, TableCreate, TableCreateInput, TableDrop, TableDropInput
@@ -12,7 +12,7 @@ from tests.support import successful
 pytestmark = pytest.mark.integration
 
 
-async def test_registered_templates_quote_identifiers_and_bind_values(db: MyApp) -> None:
+async def test_registered_templates_quote_identifiers_and_bind_values(db: PgFacade) -> None:
     table = f'{unique("quoted")}";--'
     column = 'value";--'
     value = "'); DROP TABLE registry_probe; --"

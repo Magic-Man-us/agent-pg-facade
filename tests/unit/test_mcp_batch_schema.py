@@ -6,7 +6,7 @@ import pytest
 from pydantic import JsonValue, TypeAdapter
 
 from pgfacade import PgSettings
-from pgfacade.application.registry import REGISTRY
+from pgfacade.application.registry import OPERATIONS
 from pgfacade.contracts.enums import Operation
 from pgfacade.webmcp import create_mcp
 
@@ -32,7 +32,7 @@ async def test_batch_tool_advertises_only_the_operations_this_server_exposes(fla
 async def test_read_only_batch_schema_is_smaller_than_the_full_catalog() -> None:
     read_only, _ = await _batch_schema(read_only=True)
     full, full_tools = await _batch_schema(**_FULL_ACCESS)
-    assert len(full_tools) == len(REGISTRY) - 1
+    assert len(full_tools) == len(OPERATIONS) - 1
     assert len(read_only) * 3 < len(full)
 
 
@@ -47,10 +47,10 @@ async def test_batch_schema_keeps_the_request_envelope_shape() -> None:
 async def test_batch_hints_follow_what_the_server_exposes(flags: dict[str, bool], read_only: bool) -> None:
     hints = (await create_mcp(PgSettings(_env_file=None, **flags)).get_tool("pg_batch_run")).annotations
     assert hints is not None
-    assert (hints.readOnlyHint, hints.destructiveHint, hints.idempotentHint) == (read_only, not read_only, read_only)
+    assert (hints.read_only_hint, hints.destructive_hint, hints.idempotent_hint) == (read_only, not read_only, read_only)
 
 
 async def test_scheduling_row_expiry_is_marked_destructive() -> None:
     server = create_mcp(PgSettings(_env_file=None, **_FULL_ACCESS))
     hints = (await server.get_tool("pg_lifecycle_schedule")).annotations
-    assert hints is not None and hints.destructiveHint is True and hints.readOnlyHint is False
+    assert hints is not None and hints.destructive_hint is True and hints.read_only_hint is False

@@ -5,50 +5,53 @@ import pytest
 from fastapi.testclient import TestClient
 from fastmcp import Client
 
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.application.errors import IdentityProviderInvalidResponse, NoMatchingPolicy
 from pgfacade.contracts.admin import ServerInfo, ServerInfoGet, ServerInfoGetInput
 from pgfacade.contracts.base import Contract, RequestContract
-from pgfacade.contracts.enums import ErrorReason, ValidationOrigin
+from pgfacade.contracts.enums import ErrorReason, Operation, ValidationOrigin
 from pgfacade.contracts.envelopes import Failure, ResponseEnvelope, ValidationDetails
 from pgfacade.webapp import create_app
 from pgfacade.webmcp import create_mcp
+from tests.support import swapped_handler
 
 KEY = "synthetic-boundary-key"
 
 
-class InvalidResultFacade(MyApp):
+class InMemoryFacade(PgFacade):
     async def open(self) -> None:
         return None
 
     async def close(self) -> None:
         return None
 
-    async def _execute(self, request: RequestContract[Contract]) -> Contract:
-        return ServerInfo.model_validate({"server_version": "synthetic-private-result"})
+
+async def invalid_server_info(db: PgFacade, request: RequestContract[Contract]) -> Contract:
+    return ServerInfo.model_validate({"server_version": "synthetic-private-result"})
 
 
 async def test_native_result_validation_has_identical_http_and_mcp_server_errors() -> None:
     settings = PgSettings(_env_file=None, keys={KEY: Principal()}, mcp_key=KEY)
-    facade = InvalidResultFacade(settings)
-    failures: list[Failure] = []
-    client = TestClient(create_app(settings, facade), headers={"Authorization": f"Bearer {KEY}"}, raise_server_exceptions=False)
-    for path in ("/server/info", "/call"):
-        response = client.post(path, json={"kind": "server.info", "input": {}})
-        assert response.status_code == 500
-        envelope = ResponseEnvelope[ServerInfo].model_validate_json(response.content)
-        assert envelope.kind == "server.info"
-        assert isinstance(envelope.outcome, Failure)
-        failures.append(envelope.outcome)
-    async with Client(create_mcp(settings, facade)) as mcp:
-        result = await mcp.call_tool("pg_server_info", {"request": {"kind": "server.info", "input": {}}}, raise_on_error=False)
-        assert result.is_error
-        envelope = ResponseEnvelope[ServerInfo].model_validate(result.structured_content)
-        assert envelope.kind == "server.info"
-        assert isinstance(envelope.outcome, Failure)
-        failures.append(envelope.outcome)
-    assert failures[0] == failures[1] == failures[2]
-    native = await facade.call(ServerInfoGet(input=ServerInfoGetInput()))
+    facade = InMemoryFacade(settings)
+    with swapped_handler(Operation.SERVER_INFO, invalid_server_info):
+        failures: list[Failure] = []
+        client = TestClient(create_app(settings, facade), headers={"Authorization": f"Bearer {KEY}"}, raise_server_exceptions=False)
+        for path in ("/server/info", "/call"):
+            response = client.post(path, json={"kind": "server.info", "input": {}})
+            assert response.status_code == 500
+            envelope = ResponseEnvelope[ServerInfo].model_validate_json(response.content)
+            assert envelope.kind == "server.info"
+            assert isinstance(envelope.outcome, Failure)
+            failures.append(envelope.outcome)
+        async with Client(create_mcp(settings, facade)) as mcp:
+            result = await mcp.call_tool("pg_server_info", {"request": {"kind": "server.info", "input": {}}}, raise_on_error=False)
+            assert result.is_error
+            envelope = ResponseEnvelope[ServerInfo].model_validate(result.structured_content)
+            assert envelope.kind == "server.info"
+            assert isinstance(envelope.outcome, Failure)
+            failures.append(envelope.outcome)
+        assert failures[0] == failures[1] == failures[2]
+        native = await facade.call(ServerInfoGet(input=ServerInfoGetInput()))
     assert native.outcome == failures[0]
     assert failures[0].error.reason is ErrorReason.RESPONSE_INVALID
     assert isinstance(failures[0].error.details, ValidationDetails)
@@ -59,7 +62,7 @@ async def test_native_result_validation_has_identical_http_and_mcp_server_errors
 
 async def test_http_and_mcp_input_validation_provide_safe_typed_issues() -> None:
     settings = PgSettings(_env_file=None, keys={KEY: Principal()}, mcp_key=KEY)
-    facade = InvalidResultFacade(settings)
+    facade = InMemoryFacade(settings)
     request = {"kind": "synthetic-private-operation", "input": {}}
     http = TestClient(create_app(settings, facade), headers={"Authorization": f"Bearer {KEY}"})
     response = http.post("/server/info", json=request)
@@ -77,15 +80,6 @@ async def test_http_and_mcp_input_validation_provide_safe_typed_issues() -> None
         assert "synthetic-private-operation" not in failure.model_dump_json()
 
 
-class FailingFacade(InvalidResultFacade):
-    def __init__(self, settings: PgSettings, error: Exception) -> None:
-        super().__init__(settings)
-        self.error = error
-
-    async def _execute(self, request: RequestContract[Contract]) -> Contract:
-        raise self.error
-
-
 @pytest.mark.parametrize(
     ("error", "reason"),
     [
@@ -96,19 +90,24 @@ class FailingFacade(InvalidResultFacade):
 )
 async def test_structured_failures_match_across_python_http_and_mcp(error: Exception, reason: ErrorReason) -> None:
     settings = PgSettings(_env_file=None, keys={KEY: Principal()}, mcp_key=KEY)
-    facade = FailingFacade(settings, error)
+    facade = InMemoryFacade(settings)
     request = ServerInfoGet(input=ServerInfoGetInput())
-    native = await facade.call(request)
-    assert isinstance(native.outcome, Failure)
-    assert native.outcome.error.reason is reason
-    http = TestClient(create_app(settings, facade), headers={"Authorization": f"Bearer {KEY}"})
-    response = http.post("/call", json=request.model_dump(mode="json"))
-    assert response.status_code == native.outcome.error.status
-    assert "www-authenticate" not in response.headers
-    assert ResponseEnvelope[ServerInfo].model_validate_json(response.content) == native
-    async with Client(create_mcp(settings, facade)) as mcp:
-        result = await mcp.call_tool("pg_server_info", {"request": request.model_dump(mode="json")}, raise_on_error=False)
-        assert result.is_error
-        assert ResponseEnvelope[ServerInfo].model_validate(result.structured_content) == native
+
+    async def failing_server_info(db: PgFacade, received: RequestContract[Contract]) -> Contract:
+        raise error
+
+    with swapped_handler(Operation.SERVER_INFO, failing_server_info):
+        native = await facade.call(request)
+        assert isinstance(native.outcome, Failure)
+        assert native.outcome.error.reason is reason
+        http = TestClient(create_app(settings, facade), headers={"Authorization": f"Bearer {KEY}"})
+        response = http.post("/call", json=request.model_dump(mode="json"))
+        assert response.status_code == native.outcome.error.status
+        assert "www-authenticate" not in response.headers
+        assert ResponseEnvelope[ServerInfo].model_validate_json(response.content) == native
+        async with Client(create_mcp(settings, facade)) as mcp:
+            result = await mcp.call_tool("pg_server_info", {"request": request.model_dump(mode="json")}, raise_on_error=False)
+            assert result.is_error
+            assert ResponseEnvelope[ServerInfo].model_validate(result.structured_content) == native
     assert "synthetic-private-sql" not in native.model_dump_json()
     assert "502" in http.get("/openapi.json").json()["paths"]["/call"]["post"]["responses"]

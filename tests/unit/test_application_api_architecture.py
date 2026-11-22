@@ -3,44 +3,33 @@ from __future__ import annotations
 import ast
 import asyncio
 import inspect
-from collections.abc import Iterator
-from contextlib import contextmanager
-from functools import singledispatchmethod
 from pathlib import Path
 from typing import Literal
 
 import pytest
 
 import pgfacade
-from pgfacade import MyApp, PgSettings
+from pgfacade import PgFacade, PgSettings
 from pgfacade.application.errors import InvalidRequest
-from pgfacade.application.registry import REGISTRY
+from pgfacade.application.registry import OPERATIONS
 from pgfacade.contracts.base import Contract, Count, Flag, RequestContract
 from pgfacade.contracts.enums import ErrorCode, ErrorReason, Operation
 from pgfacade.contracts.envelopes import Failure, Success
 from pgfacade.contracts.requests import REQUEST_TYPES
 from pgfacade.contracts.rows import RowsCount, RowsCountInput, RowsSelect, SqlExecute, SqlExecuteInput
-from pgfacade.myapp import check_registry, execution_dispatcher, registered_handlers
+from tests.support import swapped_handler
 
 
-@contextmanager
-def count_handler(function: object) -> Iterator[None]:
-    dispatcher = execution_dispatcher()
-    original = registered_handlers()[RowsCount]
-    dispatcher.register(RowsCount, function)
-    try:
-        yield
-    finally:
-        dispatcher.register(RowsCount, original)
-
-
-def test_request_union_catalog_and_functools_registrations_agree() -> None:
-    check_registry()
-    assert isinstance(inspect.getattr_static(MyApp, "_execute"), singledispatchmethod)
-    assert set(registered_handlers()) - {object} == set(REQUEST_TYPES)
-    assert {model.model_fields["kind"].default for model in REQUEST_TYPES} == set(REGISTRY)
-    for spec in REGISTRY.values():
-        assert "handler" not in inspect.get_annotations(type(spec))
+def test_request_union_and_catalog_agree() -> None:
+    known = {model.model_fields["kind"].default: model for model in REQUEST_TYPES}
+    assert len(known) == len(REQUEST_TYPES)
+    assert set(known) == set(OPERATIONS)
+    handlers = {(spec.handler.__module__, spec.handler.__qualname__) for spec in OPERATIONS.values()}
+    assert len(handlers) == len(OPERATIONS)
+    for operation, spec in OPERATIONS.items():
+        assert spec.op is operation
+        assert spec.request is known[operation]
+        assert inspect.iscoroutinefunction(spec.handler)
         assert issubclass(spec.request, RequestContract.__class_getitem__(spec.response))
         schema = spec.envelope.model_json_schema()
         assert schema["properties"]["kind"]["const"] == spec.op
@@ -81,10 +70,10 @@ async def test_unsupported_request_reaches_the_default_rejection() -> None:
         kind: Literal[Operation.ROWS_COUNT] = Operation.ROWS_COUNT
         input: RowsCountInput
 
-    app = MyApp(PgSettings(_env_file=None))
+    app = PgFacade(PgSettings(_env_file=None))
     request = Unsupported(input=RowsCountInput(table="items"))
     with pytest.raises(InvalidRequest, match="Unsupported request type"):
-        await app._execute(request)
+        app.spec_for(request)
     response = await app.call(request)
     assert isinstance(response.outcome, Failure)
     assert response.kind == request.kind
@@ -97,12 +86,12 @@ async def test_request_subclasses_inherit_the_registered_base_handler() -> None:
 
     seen = []
 
-    async def return_count(app: MyApp, request: RowsCount) -> Count:
+    async def return_count(app: PgFacade, request: RowsCount) -> Count:
         seen.append(type(request))
         return Count(count=7)
 
-    with count_handler(return_count):
-        response = await MyApp(PgSettings(_env_file=None)).call(SpecializedCount(input=RowsCountInput(table="items")))
+    with swapped_handler(Operation.ROWS_COUNT, return_count):
+        response = await PgFacade(PgSettings(_env_file=None)).call(SpecializedCount(input=RowsCountInput(table="items")))
     assert isinstance(response.outcome, Success)
     assert response.outcome.data.count == 7
     assert seen == [SpecializedCount]
@@ -115,28 +104,26 @@ async def test_multiple_inheritance_cannot_dispatch_beyond_the_declared_operatio
 
     invoked = []
 
-    async def forbidden_sql_handler(app: MyApp, request: SqlExecute) -> Contract:
+    async def forbidden_sql_handler(app: PgFacade, request: SqlExecute) -> Contract:
         invoked.append(request)
         raise AssertionError("The SQL handler must not run under rows.select permissions")
 
-    dispatcher = execution_dispatcher()
-    original = registered_handlers()[SqlExecute]
-    dispatcher.register(SqlExecute, forbidden_sql_handler)
-    try:
-        response = await MyApp(PgSettings(_env_file=None)).call(Hybrid(input=SqlExecuteInput(sql="DELETE FROM items")))
-    finally:
-        dispatcher.register(SqlExecute, original)
+    request = Hybrid(input=SqlExecuteInput(sql="DELETE FROM items"))
+    with swapped_handler(Operation.SQL_EXECUTE, forbidden_sql_handler), swapped_handler(Operation.ROWS_SELECT, forbidden_sql_handler):
+        with pytest.raises(InvalidRequest, match="Request inheritance does not match its operation contract"):
+            PgFacade.spec_for(request)
+        response = await PgFacade(PgSettings(_env_file=None)).call(request)
     assert isinstance(response.outcome, Failure)
     assert response.outcome.error.code == ErrorCode.INVALID_REQUEST
     assert not invoked
 
 
 async def test_invalid_handler_output_becomes_an_application_failure() -> None:
-    async def wrong_result(app: MyApp, request: RowsCount) -> Flag:
+    async def wrong_result(app: PgFacade, request: RowsCount) -> Flag:
         return Flag(ok=True)
 
-    with count_handler(wrong_result):
-        response = await MyApp(PgSettings(_env_file=None)).call(RowsCount(input=RowsCountInput(table="items")))
+    with swapped_handler(Operation.ROWS_COUNT, wrong_result):
+        response = await PgFacade(PgSettings(_env_file=None)).call(RowsCount(input=RowsCountInput(table="items")))
     assert isinstance(response.outcome, Failure)
     assert response.outcome.error.code == ErrorCode.INTERNAL_ERROR
     assert response.outcome.error.status == 500
@@ -146,14 +133,14 @@ async def test_invalid_handler_output_becomes_an_application_failure() -> None:
 async def test_cancellation_propagates_without_becoming_an_error_outcome() -> None:
     cleaned = []
 
-    async def cancelled_count(app: MyApp, request: RowsCount) -> Count:
+    async def cancelled_count(app: PgFacade, request: RowsCount) -> Count:
         try:
             raise asyncio.CancelledError
         finally:
             cleaned.append(True)
 
-    with count_handler(cancelled_count), pytest.raises(asyncio.CancelledError):
-        await MyApp(PgSettings(_env_file=None)).call(RowsCount(input=RowsCountInput(table="items")))
+    with swapped_handler(Operation.ROWS_COUNT, cancelled_count), pytest.raises(asyncio.CancelledError):
+        await PgFacade(PgSettings(_env_file=None)).call(RowsCount(input=RowsCountInput(table="items")))
     assert cleaned == [True]
 
 
@@ -182,7 +169,7 @@ async def test_stream_output_validation_redacts_invalid_values_and_closes_listen
             closed.append(True)
 
     monkeypatch.setattr(events, "listen", invalid_notifications)
-    app = MyApp(PgSettings(_env_file=None, allow_listen=True))
+    app = PgFacade(PgSettings(_env_file=None, allow_listen=True))
     context = ExecutionContext(principal=Principal(listen=True))
     with warnings.catch_warnings(record=True) as captured:
         stream = await app.stream_events(EventStreamRequest(input=EventStreamInput(channels=["events"])), context)
@@ -221,7 +208,7 @@ async def test_stream_cancellation_propagates_and_closes_listener(monkeypatch: p
             closed.append(True)
 
     monkeypatch.setattr(events, "listen", pending_notifications)
-    app = MyApp(PgSettings(_env_file=None, allow_listen=True))
+    app = PgFacade(PgSettings(_env_file=None, allow_listen=True))
     context = ExecutionContext(principal=Principal(listen=True))
     stream = await app.stream_events(EventStreamRequest(input=EventStreamInput(channels=["events"])), context)
     pending = asyncio.create_task(anext(stream))

@@ -1,6 +1,6 @@
 {
   "name": "pg-facade",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Typed PostgreSQL tools over MCP, read-only by default, with a skill for querying efficiently",
   "author": {
     "name": "Magic-Man"

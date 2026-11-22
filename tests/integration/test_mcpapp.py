@@ -6,7 +6,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from pgfacade import REGISTRY, Principal
+from pgfacade import OPERATIONS, Principal
 from pgfacade.webmcp import create_mcp
 from tests.conftest import call_tool, make_settings, tool_names, unique
 
@@ -21,7 +21,7 @@ async def mcp() -> AsyncIterator[Client]:
 
 async def test_every_allowed_op_is_a_tool(mcp: Client) -> None:
     names = await tool_names(mcp)
-    assert names == {f"pg_{s.area}_{s.action}" for s in REGISTRY.values()}  # allow_admin=True: everything
+    assert names == {f"pg_{s.area}_{s.action}" for s in OPERATIONS.values()}  # allow_admin=True: everything
     tools = {t.name: t for t in await mcp.list_tools()}
     delete = tools["pg_rows_delete"]
     assert delete.annotations is not None and delete.annotations.destructive_hint is True

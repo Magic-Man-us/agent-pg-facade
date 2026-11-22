@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
 
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.contracts.enums import ErrorCode
 from pgfacade.contracts.envelopes import Failure
 from pgfacade.contracts.types import ResultText
@@ -15,7 +15,7 @@ from pgfacade.webapp import create_app
 @pytest.mark.parametrize("channel", [",,", "x" * 64, "é" * 32])
 def test_invalid_stream_channels_fail_before_opening_a_database_connection(channel: ResultText, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = PgSettings(_env_file=None, allow_listen=True, keys={"test": Principal(listen=True)})
-    facade = MyApp(settings)
+    facade = PgFacade(settings)
     connection = Mock(side_effect=AssertionError("Invalid channels must not reach the database"))
     monkeypatch.setattr(facade, "dedicated", connection)
     client = TestClient(create_app(settings, facade), headers={"Authorization": "Bearer test"})

@@ -34,7 +34,7 @@ log = logging.getLogger("pgfacade")
 
 
 class Core:
-    """Connection and permission plumbing shared by all handlers. MyApp adds dispatch on top."""
+    """Connection and permission plumbing shared by all handlers. PgFacade adds dispatch on top."""
 
     def __init__(self, settings: PgSettings | None = None) -> None:
         self.settings = settings or PgSettings()
@@ -86,7 +86,7 @@ class Core:
     def pool(self) -> AsyncConnectionPool[Conn]:
         self._check_transaction_owner()
         if self._pool is None:
-            raise RuntimeError("MyApp is not open; call 'await db.open()' or use 'async with MyApp() as db'")
+            raise RuntimeError("PgFacade is not open; call 'await db.open()' or use 'async with PgFacade() as db'")
         return self._pool
 
     @property

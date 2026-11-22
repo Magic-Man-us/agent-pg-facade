@@ -5,7 +5,7 @@ from collections.abc import Iterator
 import pytest
 from fastapi.testclient import TestClient
 
-from pgfacade import REGISTRY, Principal
+from pgfacade import OPERATIONS, Principal
 from pgfacade.webapp import create_app
 from tests.conftest import TEST_HEADERS, make_settings, unique
 
@@ -20,11 +20,11 @@ def client() -> Iterator[TestClient]:
 
 def test_every_op_has_a_route(client: TestClient) -> None:
     paths = client.get("/openapi.json").json()["paths"]
-    for spec in REGISTRY.values():
+    for spec in OPERATIONS.values():
         assert f"/{spec.area}/{spec.action}" in paths
     assert client.get("/healthz").json() == {"ok": True, "message": None}
     ops = client.get("/ops").json()
-    assert {o["op"] for o in ops} == set(REGISTRY)  # anonymous with allow_admin=True may call everything
+    assert {o["op"] for o in ops} == set(OPERATIONS)  # anonymous with allow_admin=True may call everything
     delete = next(o for o in ops if o["op"] == "rows.delete")
     assert delete["path"] == "/rows/delete" and delete["hint"] == "destructive" and delete["perm"] == {"write": True}
 

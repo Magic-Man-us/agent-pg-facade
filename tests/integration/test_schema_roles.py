@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from pgfacade import MyApp
+from pgfacade import PgFacade
 from pgfacade.contracts.admin import (
     DiagActivity,
     DiagActivityInput,
@@ -136,7 +136,7 @@ from tests.support import fails, successful
 pytestmark = pytest.mark.integration
 
 
-async def test_introspection(db: MyApp, users: str) -> None:
+async def test_introspection(db: PgFacade, users: str) -> None:
     assert "public" in {s.name for s in (await successful(db.call(SchemaList(input=SchemaListInput())))).items}
     assert users in {t.name for t in (await successful(db.call(TableList(input=TableListInput(schema_name="public"))))).items}
     detail = await successful(db.call(TableDescribe(input=TableDescribeInput(table=users))))
@@ -145,7 +145,7 @@ async def test_introspection(db: MyApp, users: str) -> None:
     assert any(c.type == "unique" for c in detail.constraints)
 
 
-async def test_schema_lifecycle(db: MyApp) -> None:
+async def test_schema_lifecycle(db: PgFacade) -> None:
     name = unique("shop")
     await successful(db.call(SchemaCreate(input=SchemaCreateInput(name=name))))
     try:
@@ -161,7 +161,7 @@ async def test_schema_lifecycle(db: MyApp) -> None:
     assert name not in {s.name for s in (await successful(db.call(SchemaList(input=SchemaListInput())))).items}
 
 
-async def test_columns(db: MyApp, users: str) -> None:
+async def test_columns(db: PgFacade, users: str) -> None:
     await successful(
         db.call(
             ColumnAdd(
@@ -184,7 +184,7 @@ async def test_columns(db: MyApp, users: str) -> None:
         ColumnAlter(input=ColumnAlterInput(table=users, column="score"))
 
 
-async def test_constraints_and_indexes(db: MyApp, users: str) -> None:
+async def test_constraints_and_indexes(db: PgFacade, users: str) -> None:
     child = unique("orders")
     await successful(
         db.call(
@@ -218,7 +218,7 @@ async def test_constraints_and_indexes(db: MyApp, users: str) -> None:
         await successful(db.call(TableDrop(input=TableDropInput(table=child))))
 
 
-async def test_views_comments_rename(db: MyApp, users: str) -> None:
+async def test_views_comments_rename(db: PgFacade, users: str) -> None:
     view = unique("v")
     await successful(db.call(ViewCreate(input=ViewCreateInput(name=view, query=f'SELECT email FROM "{users}" WHERE score IS NOT NULL'))))
     try:
@@ -246,7 +246,7 @@ async def test_views_comments_rename(db: MyApp, users: str) -> None:
     await successful(db.call(TableRename(input=TableRenameInput(table=renamed, new_name=users))))
 
 
-async def test_extensions_and_databases(db: MyApp) -> None:
+async def test_extensions_and_databases(db: PgFacade) -> None:
     installed = (await successful(db.call(ExtensionList(input=ExtensionListInput())))).items
     assert all(e.installed for e in installed) and "plpgsql" in {e.name for e in installed}
     everything = (await successful(db.call(ExtensionList(input=ExtensionListInput(available=True))))).items
@@ -257,7 +257,7 @@ async def test_extensions_and_databases(db: MyApp) -> None:
     assert any(d.name == "postgres" for d in (await successful(db.call(DatabaseList(input=DatabaseListInput())))).items)
 
 
-async def test_role_management(db: MyApp, users: str) -> None:
+async def test_role_management(db: PgFacade, users: str) -> None:
     group, user = (unique("grp"), unique("usr"))
     await successful(db.call(RoleCreate(input=RoleCreateInput(name=group, login=False, comment="readers"))))
     info = await successful(db.call(RoleCreate(input=RoleCreateInput(name=user, password="s3cret", in_roles=[group], connection_limit=5))))
@@ -333,7 +333,7 @@ def test_role_alter_rejects_noop_but_accepts_false() -> None:
     assert RoleAlter(input=RoleAlterInput(name="x", clear_valid_until=True)).input.clear_valid_until
 
 
-async def test_server_and_diagnostics(db: MyApp, users: str) -> None:
+async def test_server_and_diagnostics(db: PgFacade, users: str) -> None:
     health = await successful(db.call(ServerHealth(input=ServerHealthInput())))
     assert health.ok and health.pool["pool_max"] == db.settings.pool_max
     assert (await successful(db.call(ServerInfoGet(input=ServerInfoGetInput())))).max_connections > 0
@@ -348,7 +348,7 @@ async def test_server_and_diagnostics(db: MyApp, users: str) -> None:
         await successful(db.call(DiagTopQueries(input=DiagTopQueriesInput())))
 
 
-async def test_maintenance(db: MyApp, users: str) -> None:
+async def test_maintenance(db: PgFacade, users: str) -> None:
     assert (await successful(db.call(MaintAnalyze(input=MaintAnalyzeInput(table=users))))).status == "ANALYZE"
     assert (await successful(db.call(MaintVacuum(input=MaintVacuumInput(table=users))))).status == "VACUUM"
     assert (await successful(db.call(MaintReindex(input=MaintReindexInput(kind="table", name=users))))).status == "REINDEX"
@@ -357,7 +357,7 @@ async def test_maintenance(db: MyApp, users: str) -> None:
 
 async def test_migrations_roundtrip(tmp_path: Path, clean_alembic: None) -> None:
     table = unique("migrated")
-    async with MyApp(make_settings(migrations_dir=tmp_path / "migrations")) as db:
+    async with PgFacade(make_settings(migrations_dir=tmp_path / "migrations")) as db:
         status = await successful(db.call(MigrationInit(input=MigrationInitInput())))
         assert status.initialized and status.current == [] and (status.pending == [])
         rev = await successful(

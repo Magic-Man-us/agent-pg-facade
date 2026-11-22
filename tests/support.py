@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 
 import pytest
 
+from pgfacade.application.registry import OPERATIONS
 from pgfacade.authorization.models import AccessControlConfig, AllowPolicy, DenyPolicy, ExecutionIdentity, Identity, Policy
 from pgfacade.authorization.types import ExecutionIdentityId, GroupId, OperationPattern, PolicyId, PolicyPriority, ResourcePattern
-from pgfacade.contracts.enums import ErrorCode
+from pgfacade.contracts.base import Contract
+from pgfacade.contracts.enums import ErrorCode, Operation
 from pgfacade.contracts.envelopes import ApiError, Failure, ResponseEnvelope
 from pgfacade.shared.types import ErrorMessage, SqlState
 
@@ -69,3 +72,13 @@ def fails(*, code: ErrorCode | None = None, sqlstate: SqlState | None = None, ma
         assert captured.value.error.code is code
     if sqlstate is not None:
         assert captured.value.error.sqlstate == sqlstate
+
+
+@contextmanager
+def swapped_handler(operation: Operation, handler: Callable[..., Awaitable[Contract]]) -> Iterator[None]:
+    spec = OPERATIONS[operation]
+    OPERATIONS[operation] = replace(spec, handler=handler)
+    try:
+        yield
+    finally:
+        OPERATIONS[operation] = spec

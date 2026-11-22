@@ -6,7 +6,7 @@ import pytest
 from psycopg import sql
 from psycopg.errors import Diagnostic
 
-from pgfacade import InvalidRequest, MyApp, PgSettings
+from pgfacade import InvalidRequest, PgFacade, PgSettings
 from pgfacade.contracts.enums import ErrorCode
 from pgfacade.contracts.rows import RowsCount, RowsCountInput
 from pgfacade.contracts.types import ResultText
@@ -17,7 +17,7 @@ pytestmark = pytest.mark.integration
 NOTICE = "pgfacade-stream-invoked"
 
 
-async def test_empty_stream_returns_columns_without_replaying_sql(db: MyApp) -> None:
+async def test_empty_stream_returns_columns_without_replaying_sql(db: PgFacade) -> None:
     function = unique("empty_stream")
     notices: list[ResultText] = []
 
@@ -47,7 +47,7 @@ async def test_empty_stream_returns_columns_without_replaying_sql(db: MyApp) -> 
 
 
 async def test_truncated_stream_releases_its_connection(settings: PgSettings) -> None:
-    async with MyApp(settings.model_copy(update={"pool_min": 1, "pool_max": 1})) as db:
+    async with PgFacade(settings.model_copy(update={"pool_min": 1, "pool_max": 1})) as db:
         async with db.tx(read_only=True, rollback=True) as conn:
             backend = conn.info.backend_pid
             result = await db.stream(conn, sql.SQL("SELECT generate_series(1, 100000) AS value"), None, 2)
@@ -60,7 +60,7 @@ async def test_truncated_stream_releases_its_connection(settings: PgSettings) ->
 
 
 async def test_cancelled_stream_releases_its_connection(settings: PgSettings) -> None:
-    async with MyApp(settings.model_copy(update={"pool_min": 1, "pool_max": 1})) as db:
+    async with PgFacade(settings.model_copy(update={"pool_min": 1, "pool_max": 1})) as db:
         function = unique("slow_stream")
         started = asyncio.Event()
 
@@ -94,7 +94,7 @@ async def test_cancelled_stream_releases_its_connection(settings: PgSettings) ->
                 await conn.execute(sql.SQL("DROP FUNCTION {}()").format(sql.Identifier(function)))
 
 
-async def test_transaction_bound_connection_rejects_another_task(db: MyApp, users: ResultText) -> None:
+async def test_transaction_bound_connection_rejects_another_task(db: PgFacade, users: ResultText) -> None:
     async with db.transaction() as transaction:
         task = asyncio.create_task(successful(transaction.call(RowsCount(input=RowsCountInput(table=users)))))
         with fails(code=ErrorCode.INVALID_REQUEST, match="belongs to the task"):
@@ -102,7 +102,7 @@ async def test_transaction_bound_connection_rejects_another_task(db: MyApp, user
         assert (await successful(transaction.call(RowsCount(input=RowsCountInput(table=users))))).count == 3
 
 
-async def test_released_transaction_view_cannot_reuse_or_close_the_pool(db: MyApp, users: ResultText) -> None:
+async def test_released_transaction_view_cannot_reuse_or_close_the_pool(db: PgFacade, users: ResultText) -> None:
     async with db.transaction() as transaction:
         assert (await successful(transaction.call(RowsCount(input=RowsCountInput(table=users))))).count == 3
     with fails(match="no longer active", code=ErrorCode.INVALID_REQUEST):
@@ -111,7 +111,7 @@ async def test_released_transaction_view_cannot_reuse_or_close_the_pool(db: MyAp
     assert (await successful(db.call(RowsCount(input=RowsCountInput(table=users))))).count == 3
 
 
-async def test_released_transaction_view_cannot_acquire_native_resources(db: MyApp) -> None:
+async def test_released_transaction_view_cannot_acquire_native_resources(db: PgFacade) -> None:
     async with db.transaction() as transaction:
         pass
     with pytest.raises(InvalidRequest, match="no longer active"):

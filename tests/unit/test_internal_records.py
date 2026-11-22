@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from pgfacade import ExecutionContext, Perm
-from pgfacade.application.registry import REGISTRY
+from pgfacade.application.registry import OPERATIONS
 from pgfacade.authorization.models import AuthorizationContext, AuthorizationDecision, ExecutionIdentity, OperationTarget
 from pgfacade.contracts.enums import Operation
 from pgfacade.infrastructure.postgres.models import TableMetadataResponse
@@ -46,7 +46,7 @@ def test_internal_records_are_frozen_and_slotted() -> None:
     context = AuthorizationContext(connector="local", default_schema="app")
     target = OperationTarget(operation=Operation.ROWS_SELECT, resource="app.notes")
     decision = AuthorizationDecision(execution_identity="reader", profile=ExecutionIdentity(role="reader"))
-    for record in (column, table, context, target, decision, ExecutionContext(), Perm(), REGISTRY[Operation.ROWS_SELECT]):
+    for record in (column, table, context, target, decision, ExecutionContext(), Perm(), OPERATIONS[Operation.ROWS_SELECT]):
         assert is_dataclass(record)
         assert set(type(record).__slots__) == {field.name for field in fields(record)}
     assert table.ident.as_string() == '"app"."notes"'

@@ -6,7 +6,7 @@ from typing import cast
 
 import pytest
 
-from pgfacade import MyApp, PgSettings
+from pgfacade import PgFacade, PgSettings
 from pgfacade.application.errors import InvalidRequest, error_payload
 from pgfacade.application.operations.queries import query_run
 from pgfacade.contracts.queries import QueryRun, QueryRunInput
@@ -50,7 +50,7 @@ async def test_template_errors_do_not_echo_template_identifiers_or_query_names(
         sql=f"SELECT {{{PRIVATE_VALUE}}}",
         params={"identifier": Param(type=ParamType.IDENTIFIER, required=True)},
     )
-    application = MyApp(PgSettings(_env_file=None))
+    application = PgFacade(PgSettings(_env_file=None))
 
     @asynccontextmanager
     async def transaction(*, read_only: SecurityFlag, rollback: SecurityFlag) -> AsyncIterator[Conn]:

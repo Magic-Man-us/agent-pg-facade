@@ -19,7 +19,7 @@ The standard environments are `py`, `lint`, `type`, and `build`. Tests install a
 
 ## Package organization
 
-The package groups code by responsibility. Public imports such as `from pgfacade import MyApp, PgSettings` remain the entry point for library callers.
+The package groups code by responsibility. Public imports such as `from pgfacade import PgFacade, PgSettings` remain the entry point for library callers.
 
 | Package | Responsibility |
 | --- | --- |
@@ -50,7 +50,7 @@ statement = Statement.ROWS_SELECT.sql
 text = Statement.ADMIN_PING.text
 ```
 
-Python, HTTP, and MCP invoke `MyApp.call(request)`. Its `singledispatchmethod` selects the typed operation handler; that handler references `Statement` resources. The SQL registry contains resources and metadata, never a second handler dispatcher.
+Python, HTTP, and MCP invoke `PgFacade.call(request)`. It runs the typed operation handler that the `OPERATIONS` catalog holds for the request's `kind`; that handler references `Statement` resources. The SQL registry contains resources and metadata, never a second handler dispatcher.
 
 [contracts/requests.py](../src/pgfacade/contracts/requests.py) owns request unions, response models, and batch schemas independently of handler registration. Domain request and result models live beside their validators under [contracts/](../src/pgfacade/contracts/).
 
@@ -86,11 +86,12 @@ internally without repeating validation. Adapters support model unions and subor
 duplicate records merely to cross a function call. Serialize at egress with the boundary model or adapter.
 
 Operation requests carry their result type through `RequestContract[Result]`.
-[myapp.py](../src/pgfacade/myapp.py) owns `MyApp.call(request, context)` and its
-`singledispatchmethod` executor. The catalog describes operations and does not execute handlers.
-Startup checks compare concrete registrations, catalog contracts, and the request union.
-Request subclasses inherit their registered base handler; inheritance resolving a different
-operation handler is rejected before policy or execution.
+[facade.py](../src/pgfacade/facade.py) owns `PgFacade.call(request, context)`.
+`OPERATIONS` in [registry.py](../src/pgfacade/application/registry.py) is the single operation catalog: `@op` stores
+each operation's metadata and handler in one `OpSpec`, and `call` runs `OPERATIONS[request.kind].handler`.
+Unit tests compare the catalog with the request union.
+A request subclass runs the handler of its registered base type; a request inheriting from more than
+one registered request type is rejected before policy or execution.
 
 Requests use `kind` and typed `input`; responses use matching `kind` and a typed `outcome`
 discriminated by `status`. Python, HTTP, and [webmcp.py](../src/pgfacade/webmcp.py) share these
@@ -129,7 +130,7 @@ Analyzing a statement that would write persistent data is rejected by PostgreSQL
 
 `pgfacade.webapp:create_app` is the single FastAPI factory.
 `pgfacade.webmcp:create_mcp` is the single FastMCP factory; its HTTP/SSE wrapper calls
-that same factory. Both accept the shared `MyApp` and delegate typed operation calls to it.
+that same factory. Both accept the shared `PgFacade` and delegate typed operation calls to it.
 The CLI, service unit, and tests import those canonical modules. Implementation paths
 `pgfacade.mcpapp` and `pgfacade.presentation.http` have been replaced by these entry points.
 

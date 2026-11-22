@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from pgfacade import Forbidden, InvalidRequest, MyApp, PgSettings, Principal
+from pgfacade import Forbidden, InvalidRequest, PgFacade, PgSettings, Principal
 from pgfacade.authorization.engine import PolicyEngine
 from pgfacade.authorization.models import (
     AccessControlConfig,
@@ -163,7 +163,7 @@ async def test_core_binds_profile_without_mutating_base_or_exposing_disabled_ops
         allow(operation="server.whoami", resource="@connector", profile="writer"), allow("rows", operation="rows.*", profile="writer")
     )
     settings = PgSettings(_env_file=None, access_control=access)
-    base = MyApp(settings)
+    base = PgFacade(settings)
     subject = Principal(name="person", identity=identity("team"), read_only=True)
     bound = base.as_(subject)
     result = await successful(bound.call(ServerWhoAmI(input=ServerWhoAmIInput())))
@@ -175,7 +175,7 @@ async def test_core_binds_profile_without_mutating_base_or_exposing_disabled_ops
 
 async def test_core_server_read_only_cap_overrides_group_write_policy() -> None:
     access = config(allow(operation="rows.*", profile="writer"))
-    bound = MyApp(PgSettings(_env_file=None, access_control=access, read_only=True)).as_(Principal(identity=identity("team")))
+    bound = PgFacade(PgSettings(_env_file=None, access_control=access, read_only=True)).as_(Principal(identity=identity("team")))
     with fails(match="server is read-only", code=ErrorCode.FORBIDDEN):
         await successful(bound.call(RowsInsert(input=RowsInsertInput(table="app.reports", rows=[{"note": "blocked"}]))))
     assert "rows.insert" not in {operation.op for operation in bound.allowed_ops()}
@@ -183,7 +183,7 @@ async def test_core_server_read_only_cap_overrides_group_write_policy() -> None:
 
 async def test_group_batch_limit_rejects_before_resource_planning_or_database_access() -> None:
     access = AccessControlConfig.model_validate(config(allow()).model_dump() | {"max_batch_operations": 1})
-    bound = MyApp(PgSettings(_env_file=None, access_control=access)).as_(Principal(identity=identity("team")))
+    bound = PgFacade(PgSettings(_env_file=None, access_control=access)).as_(Principal(identity=identity("team")))
     batch = Batch(
         input=BatchInput(requests=[RowsSelect(input=RowsSelectInput(table="reports")), SqlQuery(input=SqlQueryInput(sql="SELECT 1"))])
     )
@@ -192,7 +192,7 @@ async def test_group_batch_limit_rejects_before_resource_planning_or_database_ac
 
 
 async def test_manual_unselected_group_transaction_is_rejected_before_database_access() -> None:
-    bound = MyApp(PgSettings(_env_file=None, access_control=config(allow()))).as_(Principal(identity=identity("team")))
+    bound = PgFacade(PgSettings(_env_file=None, access_control=config(allow()))).as_(Principal(identity=identity("team")))
     with pytest.raises(InvalidRequest, match="batch.run"):
         async with bound.transaction():
             pytest.fail("Transaction should not open")

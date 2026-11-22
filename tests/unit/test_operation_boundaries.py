@@ -10,7 +10,7 @@ import pytest
 from pydantic import BaseModel, ValidationError
 
 import pgfacade
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.application.operations import lifecycle
 from pgfacade.contracts.enums import ErrorCode, ParamType
 from pgfacade.contracts.envelopes import Failure
@@ -32,7 +32,7 @@ from pgfacade.shared.types import SecurityFlag
 
 
 async def test_each_table_parameter_keeps_its_own_identifier_and_regclass(monkeypatch: pytest.MonkeyPatch) -> None:
-    app = MyApp(PgSettings(_env_file=None))
+    app = PgFacade(PgSettings(_env_file=None))
     tables = {
         "public.orders": TableMeta(schema_name="public", name="orders", kind=RelationKind.TABLE, columns={}, primary_key=()),
         "sales.customers": TableMeta(schema_name="sales", name="customers", kind=RelationKind.TABLE, columns={}, primary_key=()),
@@ -75,7 +75,7 @@ async def test_lifecycle_column_creation_requires_server_and_principal_ddl(
     async def transaction(**options: object) -> AsyncGenerator[Conn, None]:
         yield connection
 
-    app = MyApp(PgSettings(_env_file=None, allow_admin=True, allow_ddl=allow_ddl)).as_(
+    app = PgFacade(PgSettings(_env_file=None, allow_admin=True, allow_ddl=allow_ddl)).as_(
         Principal(name="admin", admin=True, ddl=principal_ddl)
     )
     monkeypatch.setattr(app, "tx", transaction)
