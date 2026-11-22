@@ -10,7 +10,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 import pgfacade
-from pgfacade import MyApp, PgSettings
+from pgfacade import PgFacade, PgSettings
 from pgfacade.contracts.enums import ErrorCode
 from pgfacade.contracts.queries import QueryList, QueryListInput, QueryRun, QueryRunInput
 from pgfacade.infrastructure.postgres.queries.loader import query_definitions
@@ -56,7 +56,7 @@ def test_unknown_statement_names_are_rejected(name: QueryName) -> None:
 
 
 async def test_only_explicit_public_queries_are_discoverable_and_invocable() -> None:
-    db = MyApp(PgSettings(_env_file=None, allow_admin=True))
+    db = PgFacade(PgSettings(_env_file=None, allow_admin=True))
     names = {item.name for item in (await successful(db.call(QueryList(input=QueryListInput())))).items}
     approved = {statement.query_name for statement in Statement if statement.access != QueryAccess.INTERNAL}
     assert names == set(query_definitions(None)) == approved
@@ -69,7 +69,7 @@ async def test_only_explicit_public_queries_are_discoverable_and_invocable() -> 
 async def test_custom_catalog_overrides_cannot_replace_internal_statements(tmp_path: Path) -> None:
     original = Statement.SCHEMA_TABLE_DROP.text
     (tmp_path / "schema.table_drop.sql").write_text("SELECT 1 AS override", encoding="utf-8")
-    db = MyApp(PgSettings(_env_file=None, queries_dir=tmp_path))
+    db = PgFacade(PgSettings(_env_file=None, queries_dir=tmp_path))
     names = {item.name for item in (await successful(db.call(QueryList(input=QueryListInput())))).items}
     assert "schema.table_drop" in names
     assert Statement.SCHEMA_TABLE_DROP.text == original

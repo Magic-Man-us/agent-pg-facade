@@ -7,14 +7,14 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.contracts.envelopes import Failure
 from pgfacade.shared.enums import McpTransport
 from pgfacade.shared.types import McpHttpTransport, SecurityFlag
 from pgfacade.webmcp import create_mcp_http_app
 
 
-class LifespanFacade(MyApp):
+class LifespanFacade(PgFacade):
     opened: SecurityFlag = False
 
     async def open(self) -> None:

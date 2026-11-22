@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter
 
-import pgfacade.myapp  # noqa: F401  # Registers the operation catalog.
-from pgfacade.application.registry import REGISTRY
+import pgfacade.facade  # noqa: F401  # Registers the operation catalog.
+from pgfacade.application.registry import OPERATIONS
 from pgfacade.contracts.enums import ErrorCode
 from pgfacade.contracts.requests import parse_request
 from pgfacade.infrastructure.postgres.queries.loader import query_definitions
@@ -69,7 +69,7 @@ def test_bundled_server_runs_the_stdio_command() -> None:
 
 def test_tool_reference_lists_every_operation() -> None:
     documented = set(re.findall(r"`(pg_[a-z_]+)`", (SKILL / "reference" / "tools.md").read_text(encoding="utf-8")))
-    assert documented == {f"pg_{spec.area}_{spec.action}" for spec in REGISTRY.values()}
+    assert documented == {f"pg_{spec.area}_{spec.action}" for spec in OPERATIONS.values()}
 
 
 def test_query_reference_lists_every_curated_query() -> None:

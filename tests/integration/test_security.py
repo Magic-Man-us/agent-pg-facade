@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.types import Message, Receive, Scope, Send
 
-from pgfacade import ANONYMOUS, MyApp, PgSettings, Principal, Unauthenticated
+from pgfacade import ANONYMOUS, PgFacade, PgSettings, Principal, Unauthenticated
 from pgfacade.application.errors import AuthenticationNotConfigured
 from pgfacade.authorization.credentials import resolve_principal
 from pgfacade.contracts.enums import ErrorCode, ErrorReason
@@ -44,7 +44,7 @@ def test_network_factories_reject_missing_keys(factory: Callable) -> None:
 def test_network_factories_reject_mismatched_facade(factory: Callable, settings: PgSettings) -> None:
     other = PgSettings(_env_file=None, keys={"other": Principal()})
     with pytest.raises(ValueError, match="server settings"):
-        factory(settings, MyApp(other))
+        factory(settings, PgFacade(other))
 
 
 @pytest.mark.parametrize("key", [None, "bad-key"])
@@ -267,14 +267,14 @@ async def test_mcp_restricted_tool_surface(settings: PgSettings) -> None:
 async def test_diagnostics_require_principal_admin_even_when_server_allows(settings: PgSettings) -> None:
     data = settings.model_dump()
     data.update(keys=settings.keys, allow_admin=True)
-    db = MyApp(PgSettings.model_validate(data)).as_(settings.keys[TEST_KEY])
+    db = PgFacade(PgSettings.model_validate(data)).as_(settings.keys[TEST_KEY])
     with fails(code=ErrorCode.FORBIDDEN):
         await successful(db.call(QueryRun(input=QueryRunInput(name="health.long_running"))))
 
 
 @pytest.mark.parametrize("factory", [create_app, create_mcp])
 def test_factory_uses_supplied_facade_settings(factory: Callable, settings: PgSettings) -> None:
-    assert factory(db=MyApp(settings)) is not None
+    assert factory(db=PgFacade(settings)) is not None
 
 
 async def test_request_body_read_timeout() -> None:

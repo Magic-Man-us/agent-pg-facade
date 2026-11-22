@@ -10,10 +10,10 @@ from fastapi.testclient import TestClient
 from fastmcp import Client
 from pydantic import JsonValue
 
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.application.context import ExecutionContext
 from pgfacade.application.errors import Forbidden
-from pgfacade.application.registry import REGISTRY, OpSpec
+from pgfacade.application.registry import OPERATIONS, OpSpec
 from pgfacade.contracts.admin import (
     Health,
     MigrationOutcome,
@@ -34,9 +34,9 @@ from pgfacade.contracts.requests import BatchResult
 from pgfacade.contracts.roles import PrivilegeInfoList, RoleInfo, RoleInfoList
 from pgfacade.contracts.rows import Plan
 from pgfacade.contracts.schema import DatabaseInfoList, ExtensionInfoList, SchemaInfoList, TableDetail, TableInfo, TableInfoList
-from pgfacade.myapp import execution_dispatcher, registered_handlers
 from pgfacade.webapp import create_app
 from pgfacade.webmcp import create_mcp
+from tests.support import swapped_handler
 
 _KEY = "contract-matrix-test-only"
 _PRINCIPAL = Principal(name="matrix", ddl=True, sql=True, admin=True, migrate=True, listen=True)
@@ -170,7 +170,7 @@ _RESULTS: tuple[Contract, ...] = (
 _RESULT_BY_MODEL = {type(result): result for result in _RESULTS}
 
 
-class InMemoryApp(MyApp):
+class InMemoryApp(PgFacade):
     async def open(self) -> None:
         pass
 
@@ -214,33 +214,28 @@ async def adapters() -> AsyncIterator[tuple[InMemoryApp, TestClient, Client]]:
             yield app, http, mcp
 
 
-@pytest.mark.parametrize("operation", tuple(REGISTRY))
+@pytest.mark.parametrize("operation", tuple(OPERATIONS))
 @pytest.mark.parametrize("fails", [False, True], ids=["success", "domain-failure"])
 async def test_every_operation_uses_the_same_python_http_mcp_contract(
     adapters: tuple[InMemoryApp, TestClient, Client], operation: Operation, fails: bool
 ) -> None:
     app, http, mcp = adapters
-    spec = REGISTRY[operation]
+    spec = OPERATIONS[operation]
     request = sample_request(spec)
     result = _RESULT_BY_MODEL[spec.response]
     seen = []
 
-    async def matrix_handler(execution: MyApp, received: RequestContract[Contract]) -> Contract:
+    async def matrix_handler(execution: PgFacade, received: RequestContract[Contract]) -> Contract:
         assert execution._execution_context is not None
         seen.append((received.model_dump(mode="json"), execution._execution_context.provenance))
         if fails:
             raise Forbidden("Matrix operation denied")
         return result
 
-    dispatcher = execution_dispatcher()
-    original = registered_handlers()[spec.request]
-    dispatcher.register(spec.request, matrix_handler)
-    try:
+    with swapped_handler(operation, matrix_handler):
         native = await app.call(request, ExecutionContext(principal=_PRINCIPAL))
         response = http.post(f"/{spec.area}/{spec.action}", json=request.model_dump(mode="json"))
         tool = await mcp.call_tool(f"pg_{spec.area}_{spec.action}", {"request": request.model_dump(mode="json")}, raise_on_error=False)
-    finally:
-        dispatcher.register(spec.request, original)
     expected = native.model_dump(mode="json")
     assert native.kind == operation
     if fails:

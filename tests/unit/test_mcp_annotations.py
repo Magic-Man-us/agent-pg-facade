@@ -3,8 +3,8 @@ from __future__ import annotations
 import pytest
 from fastmcp.tools import Tool
 
-from pgfacade import MyApp, PgSettings, Principal
-from pgfacade.application.registry import REGISTRY
+from pgfacade import PgFacade, PgSettings, Principal
+from pgfacade.application.registry import OPERATIONS
 from pgfacade.contracts.enums import Operation
 from pgfacade.webmcp import create_mcp
 
@@ -20,12 +20,12 @@ async def tools() -> dict[str, Tool]:
         allow_migrate=True,
         allow_listen=True,
     )
-    return {tool.name: tool for tool in await create_mcp(settings, MyApp(settings)).list_tools()}
+    return {tool.name: tool for tool in await create_mcp(settings, PgFacade(settings)).list_tools()}
 
 
 async def test_every_tool_publishes_catalog_annotations(tools: dict[str, Tool]) -> None:
-    assert set(tools) == {f"pg_{spec.area}_{spec.action}" for spec in REGISTRY.values()}
-    for spec in REGISTRY.values():
+    assert set(tools) == {f"pg_{spec.area}_{spec.action}" for spec in OPERATIONS.values()}
+    for spec in OPERATIONS.values():
         hints = tools[f"pg_{spec.area}_{spec.action}"].annotations
         assert hints is not None
         assert hints.idempotent_hint == spec.idempotent
@@ -54,7 +54,7 @@ async def test_every_tool_publishes_catalog_annotations(tools: dict[str, Tool]) 
     ],
 )
 async def test_overwrites_and_removals_are_not_described_as_additive(operation: Operation, tools: dict[str, Tool]) -> None:
-    spec = REGISTRY[operation]
+    spec = OPERATIONS[operation]
     hints = tools[f"pg_{spec.area}_{spec.action}"].annotations
     assert hints is not None
     assert hints.read_only_hint is False

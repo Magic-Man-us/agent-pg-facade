@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pgfacade import MyApp, Principal
+from pgfacade import PgFacade, Principal
 from pgfacade.authorization.models import AccessControlConfig, ExecutionIdentity
 from pgfacade.contracts.requests import Batch, BatchInput
 from pgfacade.contracts.rows import (
@@ -22,7 +22,7 @@ from tests.support import allow, identity, successful
 @pytest.mark.integration
 async def test_real_role_binding_and_batch_profile_coherence(users: str) -> None:
     reader_role, writer_role = (unique("policy_reader"), unique("policy_writer"))
-    async with MyApp(make_settings()) as admin:
+    async with PgFacade(make_settings()) as admin:
         await successful(admin.call(SqlExecute(input=SqlExecuteInput(sql=f'CREATE ROLE "{reader_role}" NOLOGIN'))))
         await successful(admin.call(SqlExecute(input=SqlExecuteInput(sql=f'CREATE ROLE "{writer_role}" NOLOGIN'))))
         try:
@@ -41,7 +41,7 @@ async def test_real_role_binding_and_batch_profile_coherence(users: str) -> None
                     allow("write", operation="rows.*", resource=f"public.{users}", profile="writer"),
                 ),
             )
-            async with MyApp(make_settings(access_control=access)) as facade:
+            async with PgFacade(make_settings(access_control=access)) as facade:
                 person = facade.as_(Principal(name="person", identity=identity("team"), read_only=True))
                 before = (await successful(person.call(RowsCount(input=RowsCountInput(table=users))))).count
                 result = await successful(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from pydantic import BaseModel
 
@@ -20,7 +20,7 @@ from pgfacade.shared.types import (
 )
 
 if TYPE_CHECKING:
-    from pgfacade.myapp import MyApp
+    from pgfacade.facade import PgFacade
 
 _PERMISSION_NAMES: tuple[PermissionName, ...] = (
     PermissionName.WRITE,
@@ -69,6 +69,9 @@ MIGRATE_WRITE = Perm(write=True, migrate=True)
 LISTEN = Perm(listen=True)
 
 
+type Handler = Callable[[PgFacade, RequestContract[Contract]], Awaitable[Contract]]
+
+
 @dataclass(frozen=True, slots=True)
 class OpSpec:
     op: Operation
@@ -81,9 +84,10 @@ class OpSpec:
     hint: OperationHint
     summary: OperationSummary
     idempotent: bool
+    handler: Handler
 
 
-REGISTRY: dict[Operation, OpSpec] = {}
+OPERATIONS: dict[Operation, OpSpec] = {}
 
 
 def op_name(request: type[Contract]) -> Operation:
@@ -100,7 +104,7 @@ def op[RequestT: RequestContract[Contract], ResultT: Contract](
     perm: Perm = READ,
     hint: OperationHint | None = None,
     idempotent: bool | None = None,
-) -> Callable[[Callable[[MyApp, RequestT], Awaitable[ResultT]]], Callable[[MyApp, RequestT], Awaitable[ResultT]]]:
+) -> Callable[[Callable[[PgFacade, RequestT], Awaitable[ResultT]]], Callable[[PgFacade, RequestT], Awaitable[ResultT]]]:
     result_contract = RequestContract.__class_getitem__(response)
     if not isinstance(result_contract, type) or not issubclass(request, result_contract):
         raise TypeError(f"{request.__name__} is not a request for {response.__name__}")
@@ -110,16 +114,12 @@ def op[RequestT: RequestContract[Contract], ResultT: Contract](
     summary = (request.__doc__ or name).strip().splitlines()[0]
 
     def decorate(
-        function: Callable[[MyApp, RequestT], Awaitable[ResultT]],
-    ) -> Callable[[MyApp, RequestT], Awaitable[ResultT]]:
-        if name in REGISTRY:
+        function: Callable[[PgFacade, RequestT], Awaitable[ResultT]],
+    ) -> Callable[[PgFacade, RequestT], Awaitable[ResultT]]:
+        if name in OPERATIONS:
             raise RuntimeError(f"duplicate op {name!r}")
-
-        from pgfacade.myapp import execution_dispatcher
-
-        execution_dispatcher().register(request)(function)
         envelope = response_model(request)
-        REGISTRY[name] = OpSpec(
+        OPERATIONS[name] = OpSpec(
             op=name,
             area=area,
             action=action,
@@ -130,6 +130,8 @@ def op[RequestT: RequestContract[Contract], ResultT: Contract](
             hint=resolved_hint,
             summary=summary,
             idempotent=(resolved_hint == OperationHint.READ) if idempotent is None else idempotent,
+            # Dispatch only passes a handler an instance of its own request type.
+            handler=cast(Handler, function),
         )
         return function
 

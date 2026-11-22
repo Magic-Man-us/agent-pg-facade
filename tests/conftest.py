@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 from fastmcp import Client
 
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.contracts.rows import RowsInsert, RowsInsertInput, SqlExecute, SqlExecuteInput
 from pgfacade.contracts.schema import ColumnSpec, TableCreate, TableCreateInput, TableDrop, TableDropInput
 from tests.support import successful
@@ -50,8 +50,8 @@ def settings() -> PgSettings:
 
 
 @pytest.fixture(scope="session")
-async def db(settings: PgSettings) -> AsyncIterator[MyApp]:
-    async with MyApp(settings) as facade:
+async def db(settings: PgSettings) -> AsyncIterator[PgFacade]:
+    async with PgFacade(settings) as facade:
         yield facade
 
 
@@ -79,7 +79,7 @@ SEED = [
 
 
 @pytest.fixture
-async def users(db: MyApp) -> AsyncIterator[str]:
+async def users(db: PgFacade) -> AsyncIterator[str]:
     """A fresh, seeded users table with a unique name; dropped afterwards."""
     table = unique("users")
     await successful(db.call(users_spec(table)))
@@ -91,7 +91,7 @@ async def users(db: MyApp) -> AsyncIterator[str]:
 
 
 @pytest.fixture
-async def clean_alembic(db: MyApp) -> AsyncIterator[None]:
+async def clean_alembic(db: PgFacade) -> AsyncIterator[None]:
     """Migration tests share one database; start and finish with no alembic_version table."""
     await successful(db.call(SqlExecute(input=SqlExecuteInput(sql="DROP TABLE IF EXISTS alembic_version"))))
     try:
@@ -100,7 +100,7 @@ async def clean_alembic(db: MyApp) -> AsyncIterator[None]:
         await successful(db.call(SqlExecute(input=SqlExecuteInput(sql="DROP TABLE IF EXISTS alembic_version"))))
 
 
-async def age_rows(db: MyApp, table: str, emails: list[str], days: int) -> None:
+async def age_rows(db: PgFacade, table: str, emails: list[str], days: int) -> None:
     await successful(
         db.call(
             SqlExecute(

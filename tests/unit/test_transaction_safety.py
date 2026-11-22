@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.contracts.admin import (
     MaintBackend,
     MaintBackendInput,
@@ -36,14 +36,14 @@ from pgfacade.shared.types import SecurityFlag
 from tests.support import fails, successful
 
 
-class UnopenedFacade(MyApp):
+class UnopenedFacade(PgFacade):
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[Self]:
         pytest.fail("A migration batch must be rejected before opening a database transaction")
         yield self
 
 
-class BoundFacade(MyApp):
+class BoundFacade(PgFacade):
     @property
     def in_transaction(self) -> SecurityFlag:
         return True
@@ -81,7 +81,7 @@ async def test_migration_preflight_preserves_permission_denial() -> None:
 
 
 async def test_query_list_hides_unavailable_builtin_diagnostics() -> None:
-    db = MyApp(PgSettings(_env_file=None))
+    db = PgFacade(PgSettings(_env_file=None))
     result = await successful(db.call(QueryList(input=QueryListInput())))
     names = {query.name for query in result.items}
     assert names.isdisjoint(statement.query_name for statement in Statement if statement.access == QueryAccess.ADMIN)
@@ -90,7 +90,7 @@ async def test_query_list_hides_unavailable_builtin_diagnostics() -> None:
 
 
 async def test_query_list_requires_both_server_and_principal_admin() -> None:
-    db = MyApp(PgSettings(_env_file=None, allow_admin=True))
+    db = PgFacade(PgSettings(_env_file=None, allow_admin=True))
     result = await successful(db.call(QueryList(input=QueryListInput())))
     assert {statement.query_name for statement in Statement if statement.access == QueryAccess.ADMIN} <= {
         query.name for query in result.items
@@ -105,7 +105,7 @@ async def test_query_list_requires_both_server_and_principal_admin() -> None:
 async def test_query_list_keeps_builtin_name_overrides_admin_only(tmp_path: Path) -> None:
     (tmp_path / "health.connections.sql").write_text("-- category: custom\nSELECT 1 AS harmless")
     (tmp_path / "custom.safe.sql").write_text("-- category: custom\nSELECT 1 AS harmless")
-    db = MyApp(PgSettings(_env_file=None, queries_dir=tmp_path))
+    db = PgFacade(PgSettings(_env_file=None, queries_dir=tmp_path))
     result = await successful(db.call(QueryList(input=QueryListInput(category="custom"))))
     assert [query.name for query in result.items] == ["custom.safe"]
     with fails(code=ErrorCode.FORBIDDEN):
@@ -131,7 +131,7 @@ async def test_bound_transaction_rejects_external_side_effects_before_handlers(o
     db = BoundFacade(PgSettings(_env_file=None, allow_admin=True))
     backend_read = AsyncMock(side_effect=AssertionError("Backend handler must not run"))
     reload_queries = Mock(side_effect=AssertionError("Query reload handler must not run"))
-    with patch.object(MyApp, "read", backend_read), patch("pgfacade.application.operations.queries.reload", reload_queries):
+    with patch.object(PgFacade, "read", backend_read), patch("pgfacade.application.operations.queries.reload", reload_queries):
         with fails(match="cannot run inside a transaction", code=ErrorCode.INVALID_REQUEST):
             await successful(db.call(operation))
     backend_read.assert_not_called()
@@ -171,7 +171,7 @@ async def test_explain_uses_read_only_rollback_transaction(monkeypatch: pytest.M
     from pgfacade.contracts.rows import SqlExplain, SqlExplainInput
     from pgfacade.infrastructure.postgres.engine import Conn
 
-    application = MyApp(PgSettings(_env_file=None))
+    application = PgFacade(PgSettings(_env_file=None))
     connection = Mock()
     cursor = Mock()
     cursor.execute = AsyncMock()

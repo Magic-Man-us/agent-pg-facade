@@ -1,4 +1,4 @@
-"""lifecycle.*, event.*, and query.* through MyApp.call."""
+"""lifecycle.*, event.*, and query.* through PgFacade.call."""
 
 import asyncio
 import json
@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from pgfacade import MyApp, Principal
+from pgfacade import PgFacade, Principal
 from pgfacade.contracts.enums import ErrorCode, ErrorReason, KnownValidationCode
 from pgfacade.contracts.envelopes import Failure, ValidationDetails
 from pgfacade.contracts.events import (
@@ -64,7 +64,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-async def lifecycle(db: MyApp) -> AsyncIterator[MyApp]:
+async def lifecycle(db: PgFacade) -> AsyncIterator[PgFacade]:
     """Installed, with no policies before or after."""
     await successful(db.call(LifecycleInstall(input=LifecycleInstallInput())))
     for p in (await successful(db.call(LifecycleList(input=LifecycleListInput())))).items:
@@ -74,7 +74,7 @@ async def lifecycle(db: MyApp) -> AsyncIterator[MyApp]:
         await successful(db.call(LifecycleRemove(input=LifecycleRemoveInput(policy_id=p.id))))
 
 
-async def test_install_is_idempotent_and_list_reports_state(lifecycle: MyApp) -> None:
+async def test_install_is_idempotent_and_list_reports_state(lifecycle: PgFacade) -> None:
     assert (await successful(lifecycle.call(LifecycleInstall(input=LifecycleInstallInput())))).status == "INSTALLED"
     listing = await successful(lifecycle.call(LifecycleList(input=LifecycleListInput())))
     assert listing.installed and listing.items == [] and (listing.scheduled is None)
@@ -82,7 +82,7 @@ async def test_install_is_idempotent_and_list_reports_state(lifecycle: MyApp) ->
         await successful(lifecycle.call(LifecycleSchedule(input=LifecycleScheduleInput(cron="*/5 * * * *"))))
 
 
-async def test_row_ttl_delete_with_preview_history_and_event(lifecycle: MyApp, users: str) -> None:
+async def test_row_ttl_delete_with_preview_history_and_event(lifecycle: PgFacade, users: str) -> None:
     db = lifecycle
     await age_rows(db, users, ["ann@x.io", "bob@x.io"], days=10)
     policy = await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="created_at", ttl="7 days"))))
@@ -105,7 +105,7 @@ async def test_row_ttl_delete_with_preview_history_and_event(lifecycle: MyApp, u
     assert (await successful(db.call(LifecyclePreview(input=LifecyclePreviewInput(policy_id=policy.id))))).count == 0
 
 
-async def test_row_ttl_archive(lifecycle: MyApp, users: str) -> None:
+async def test_row_ttl_archive(lifecycle: PgFacade, users: str) -> None:
     db = lifecycle
     await age_rows(db, users, ["ann@x.io", "bob@x.io"], days=40)
     policy = await successful(
@@ -119,7 +119,7 @@ async def test_row_ttl_archive(lifecycle: MyApp, users: str) -> None:
     await successful(db.call(TableDrop(input=TableDropInput(table=f"{users}_archive"))))
 
 
-async def test_row_ttl_expiry_column_batches_and_add_column(lifecycle: MyApp, users: str) -> None:
+async def test_row_ttl_expiry_column_batches_and_add_column(lifecycle: PgFacade, users: str) -> None:
     db = lifecycle
     await successful(db.call(ColumnAdd(input=ColumnAddInput(table=users, column=ColumnSpec(name="expires_at", type="timestamptz")))))
     await successful(
@@ -143,7 +143,7 @@ async def test_row_ttl_expiry_column_batches_and_add_column(lifecycle: MyApp, us
     assert (await successful(db.call(LifecyclePreview(input=LifecyclePreviewInput(policy_id=added.id))))).count == 0
 
 
-async def test_table_expiry(lifecycle: MyApp) -> None:
+async def test_table_expiry(lifecycle: PgFacade) -> None:
     db = lifecycle
     doomed, kept = (unique("doomed"), unique("kept"))
     for t in (doomed, kept):
@@ -169,7 +169,7 @@ async def test_table_expiry(lifecycle: MyApp) -> None:
         await successful(db.call(TableDrop(input=TableDropInput(table=kept))))
 
 
-async def test_lifecycle_validation_and_errors(lifecycle: MyApp, users: str) -> None:
+async def test_lifecycle_validation_and_errors(lifecycle: PgFacade, users: str) -> None:
     db = lifecycle
     with fails(match="needs a timestamp", code=ErrorCode.INVALID_REQUEST):
         await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="email", ttl="1 day"))))
@@ -203,7 +203,7 @@ async def test_lifecycle_validation_and_errors(lifecycle: MyApp, users: str) -> 
 
 
 async def test_background_sweeper(users: str) -> None:
-    async with MyApp(make_settings(lifecycle_sweep_s=0.2)) as db:
+    async with PgFacade(make_settings(lifecycle_sweep_s=0.2)) as db:
         await successful(db.call(LifecycleInstall(input=LifecycleInstallInput())))
         await age_rows(db, users, ["ann@x.io"], days=3)
         policy = await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="created_at", ttl="1 day"))))
@@ -217,7 +217,7 @@ async def test_background_sweeper(users: str) -> None:
             await successful(db.call(LifecycleRemove(input=LifecycleRemoveInput(policy_id=policy.id))))
 
 
-async def test_notify_and_wait(db: MyApp) -> None:
+async def test_notify_and_wait(db: PgFacade) -> None:
     channel = unique("chan")
     waiter = asyncio.create_task(
         successful(db.call(EventWait(input=EventWaitInput(channels=[channel, "other"], timeout_s=5, max_events=2))))
@@ -233,7 +233,7 @@ async def test_notify_and_wait(db: MyApp) -> None:
         await successful(db.as_(Principal(name="deaf")).call(EventWait(input=EventWaitInput(channels=[channel], timeout_s=0.1))))
 
 
-async def test_table_watch(db: MyApp, users: str) -> None:
+async def test_table_watch(db: PgFacade, users: str) -> None:
     watch = await successful(db.call(EventWatch(input=EventWatchInput(table=users, events=["insert", "delete"], columns=["id", "email"]))))
     assert watch.channel == f"pgfacade:public.{users}" and watch.events == ["delete", "insert"] and (watch.columns == ["id", "email"])
     listed = [w for w in (await successful(db.call(EventWatchList(input=EventWatchListInput())))).items if w.table_name == users]
@@ -263,7 +263,7 @@ async def test_table_watch(db: MyApp, users: str) -> None:
     assert not [w for w in (await successful(db.call(EventWatchList(input=EventWatchListInput())))).items if w.table_name == users]
 
 
-async def test_catalog_contents(db: MyApp) -> None:
+async def test_catalog_contents(db: PgFacade) -> None:
     listing = await successful(db.call(QueryList(input=QueryListInput())))
     names = {q.name for q in listing.items}
     assert {"size.tables", "health.long_running", "index.missing_fk", "rows.duplicates", "table.column_stats"} <= names
@@ -277,7 +277,7 @@ async def test_catalog_contents(db: MyApp) -> None:
     }
 
 
-async def test_row_level_queries(db: MyApp, users: str) -> None:
+async def test_row_level_queries(db: PgFacade, users: str) -> None:
     assert (await successful(db.call(QueryRun(input=QueryRunInput(name="rows.recent", params={"table": users, "limit": 2}))))).rowcount == 2
     assert (
         await successful(
@@ -347,11 +347,11 @@ async def test_row_level_queries(db: MyApp, users: str) -> None:
         "security.rls_status",
     ],
 )
-async def test_catalog_queries_run(db: MyApp, name: str) -> None:
+async def test_catalog_queries_run(db: PgFacade, name: str) -> None:
     assert (await successful(db.call(QueryRun(input=QueryRunInput(name=name))))).columns
 
 
-async def test_query_param_handling(db: MyApp, users: str) -> None:
+async def test_query_param_handling(db: PgFacade, users: str) -> None:
     cases = (
         (QueryRunInput(name="rows.recent"), "table", KnownValidationCode.MISSING),
         (QueryRunInput(name="rows.recent", params={"table": users, "bogus": 1}), "bogus", KnownValidationCode.EXTRA_FORBIDDEN),
@@ -385,7 +385,7 @@ async def test_queries_directory(tmp_path: Path, users: str) -> None:
     )
     (tmp_path / "rows.duplicates.sql").write_text("-- description: override\nSELECT 1 AS overridden\n")
     (tmp_path / "custom.sneaky.sql").write_text("-- param: table:table T\nDELETE FROM {table}\n")
-    async with MyApp(make_settings(queries_dir=tmp_path)) as db:
+    async with PgFacade(make_settings(queries_dir=tmp_path)) as db:
         await successful(db.call(QueryReload(input=QueryReloadInput())))
         listing = await successful(db.call(QueryList(input=QueryListInput(category="custom"))))
         assert listing.directory == str(tmp_path) and {q.name for q in listing.items} == {"custom.top_scores", "custom.sneaky"}

@@ -4,13 +4,15 @@ import pytest
 from fastapi.testclient import TestClient
 from fastmcp import Client
 
-from pgfacade import REGISTRY, MyApp, PgSettings, Principal
+from pgfacade import OPERATIONS, PgFacade, PgSettings, Principal
 from pgfacade.contracts.admin import WhoAmI
 from pgfacade.contracts.base import Contract, Count, RequestContract
+from pgfacade.contracts.enums import Operation
 from pgfacade.contracts.envelopes import Failure, ResponseEnvelope, Success
 from pgfacade.contracts.streaming import EventStreamResponse
 from pgfacade.webapp import create_app
 from pgfacade.webmcp import create_mcp
+from tests.support import swapped_handler
 
 KEY = "contract-test-key"
 HEADERS = {"Authorization": f"Bearer {KEY}"}
@@ -91,14 +93,18 @@ def test_malformed_json_does_not_echo_input(settings: PgSettings) -> None:
     assert "synthetic-private-input" not in response.text
 
 
-class BrokenFacade(MyApp):
-    async def _execute(self, request: RequestContract[Contract]) -> Contract:
-        raise RuntimeError("synthetic-internal-credential")
+async def broken_handler(db: PgFacade, request: RequestContract[Contract]) -> Contract:
+    raise RuntimeError("synthetic-internal-credential")
+
+
+async def wrong_result_handler(db: PgFacade, request: RequestContract[Contract]) -> Contract:
+    return Count(count=1)
 
 
 def test_internal_exception_uses_redacted_error_contract(settings: PgSettings) -> None:
-    client = TestClient(create_app(settings, BrokenFacade(settings)), headers=HEADERS, raise_server_exceptions=False)
-    response = client.post("/server/whoami", json={"kind": "server.whoami", "input": {}})
+    client = TestClient(create_app(settings, PgFacade(settings)), headers=HEADERS, raise_server_exceptions=False)
+    with swapped_handler(Operation.SERVER_WHOAMI, broken_handler):
+        response = client.post("/server/whoami", json={"kind": "server.whoami", "input": {}})
     envelope = ResponseEnvelope[WhoAmI].model_validate_json(response.content)
     failure = envelope.outcome
     assert isinstance(failure, Failure)
@@ -130,7 +136,7 @@ def _reachable_references(schema: dict[str, object], definitions: dict[str, obje
 def test_openapi_documents_envelopes_for_each_operation_and_dispatch(settings: PgSettings) -> None:
     schema = TestClient(create_app(settings)).get("/openapi.json").json()
     definitions = schema["components"]["schemas"]
-    for spec in REGISTRY.values():
+    for spec in OPERATIONS.values():
         operation = schema["paths"][f"/{spec.area}/{spec.action}"]["post"]
         request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
         request_refs = _reachable_references(request_schema, definitions)
@@ -144,10 +150,10 @@ def test_openapi_documents_envelopes_for_each_operation_and_dispatch(settings: P
             assert "Failure" in _reachable_references(failure_schema, definitions)
     call_schema = schema["paths"]["/call"]["post"]["responses"]["200"]["content"]["application/json"]["schema"]
     call_refs = _reachable_references(call_schema, definitions)
-    assert {spec.response.__name__ for spec in REGISTRY.values()} <= call_refs
+    assert {spec.response.__name__ for spec in OPERATIONS.values()} <= call_refs
 
 
-class InMemoryFacade(MyApp):
+class InMemoryFacade(PgFacade):
     async def open(self) -> None:
         return None
 
@@ -201,12 +207,9 @@ async def test_mcp_authentication_failure_is_structured() -> None:
 
 
 async def test_mcp_internal_error_is_structured_and_redacted(settings: PgSettings) -> None:
-    class BrokenInMemoryFacade(InMemoryFacade):
-        async def _execute(self, request: RequestContract[Contract]) -> Contract:
-            raise RuntimeError("synthetic-internal-credential")
-
-    async with Client(create_mcp(settings, BrokenInMemoryFacade(settings))) as client:
-        response = await client.call_tool("pg_server_whoami", {"request": {"kind": "server.whoami", "input": {}}}, raise_on_error=False)
+    async with Client(create_mcp(settings, InMemoryFacade(settings))) as client:
+        with swapped_handler(Operation.SERVER_WHOAMI, broken_handler):
+            response = await client.call_tool("pg_server_whoami", {"request": {"kind": "server.whoami", "input": {}}}, raise_on_error=False)
         assert response.is_error
         assert response.structured_content is not None
         envelope = ResponseEnvelope[WhoAmI].model_validate(response.structured_content)
@@ -246,14 +249,11 @@ def test_sse_notification_and_stream_failure_use_typed_envelopes(monkeypatch: py
 
 
 async def test_wrong_operation_result_is_a_shared_internal_error(settings: PgSettings) -> None:
-    class WrongResultFacade(InMemoryFacade):
-        async def _execute(self, request: RequestContract[Contract]) -> Contract:
-            return Count(count=1)
-
-    client = TestClient(create_app(settings, WrongResultFacade(settings)), headers=HEADERS, raise_server_exceptions=False)
+    client = TestClient(create_app(settings, InMemoryFacade(settings)), headers=HEADERS, raise_server_exceptions=False)
     failures: list[Failure] = []
     for path in ("/server/whoami", "/call"):
-        response = client.post(path, json={"kind": "server.whoami", "input": {}})
+        with swapped_handler(Operation.SERVER_WHOAMI, wrong_result_handler):
+            response = client.post(path, json={"kind": "server.whoami", "input": {}})
         assert response.status_code == 500
         envelope = ResponseEnvelope[WhoAmI].model_validate_json(response.content)
         failure = envelope.outcome
@@ -262,8 +262,9 @@ async def test_wrong_operation_result_is_a_shared_internal_error(settings: PgSet
         assert failure.error.status == 500
         assert failure.error.code == "internal_error"
         failures.append(failure)
-    async with Client(create_mcp(settings, WrongResultFacade(settings))) as mcp:
-        response = await mcp.call_tool("pg_server_whoami", {"request": {"kind": "server.whoami", "input": {}}}, raise_on_error=False)
+    async with Client(create_mcp(settings, InMemoryFacade(settings))) as mcp:
+        with swapped_handler(Operation.SERVER_WHOAMI, wrong_result_handler):
+            response = await mcp.call_tool("pg_server_whoami", {"request": {"kind": "server.whoami", "input": {}}}, raise_on_error=False)
         assert response.is_error
         assert response.structured_content is not None
         envelope = ResponseEnvelope[WhoAmI].model_validate(response.structured_content)

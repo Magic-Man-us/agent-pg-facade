@@ -6,13 +6,13 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from fastmcp import Client
 
-from pgfacade import MyApp, PgSettings, Principal
+from pgfacade import PgFacade, PgSettings, Principal
 from pgfacade.infrastructure.startup import StartupCommand
 from pgfacade.webapp import create_app
 from pgfacade.webmcp import create_mcp
 
 
-class CheckingFacade(MyApp):
+class CheckingFacade(PgFacade):
     async def open(self) -> None:
         assert self.settings.startup_command is not None
         ready_file = Path(self.settings.startup_command.argv[-1])

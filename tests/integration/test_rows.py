@@ -1,9 +1,9 @@
-"""rows.*, sql.*, batch, transactions, and principals through MyApp.call."""
+"""rows.*, sql.*, batch, transactions, and principals through PgFacade.call."""
 
 import pytest
 from pydantic import ValidationError
 
-from pgfacade import REGISTRY, InvalidRequest, MyApp, Principal
+from pgfacade import OPERATIONS, InvalidRequest, PgFacade, Principal
 from pgfacade.contracts.admin import ServerInfoGet, ServerInfoGetInput, ServerWhoAmI, ServerWhoAmIInput
 from pgfacade.contracts.base import Between, Cmp, Contains, Count, In, IsNull, Not, Or, OrderBy, TextSearch
 from pgfacade.contracts.enums import ErrorCode
@@ -55,7 +55,7 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.mark.parametrize(("conflict", "expected_score"), [(DoNothing(), 9), (DoUpdate(target=["label"], update=["score"]), 0)])
-async def test_default_only_insert_honors_conflict_handling(db: MyApp, conflict: DoNothing | DoUpdate, expected_score: int) -> None:
+async def test_default_only_insert_honors_conflict_handling(db: PgFacade, conflict: DoNothing | DoUpdate, expected_score: int) -> None:
     table = unique("default_conflict")
     await successful(
         db.call(
@@ -80,14 +80,14 @@ async def test_default_only_insert_honors_conflict_handling(db: MyApp, conflict:
 
 
 def test_registry_is_complete() -> None:
-    assert len(REGISTRY) >= 85
-    spec = REGISTRY["rows.delete"]
+    assert len(OPERATIONS) >= 85
+    spec = OPERATIONS["rows.delete"]
     assert spec.area == "rows" and spec.action == "delete" and (spec.hint == "destructive") and spec.perm.write
-    assert REGISTRY["sql.execute"].perm.flags() == {"write": True, "raw": True}
-    assert REGISTRY["event.wait"].perm.flags() == {"listen": True}
+    assert OPERATIONS["sql.execute"].perm.flags() == {"write": True, "raw": True}
+    assert OPERATIONS["event.wait"].perm.flags() == {"listen": True}
 
 
-async def test_call_uses_typed_requests_and_validated_boundary_models(db: MyApp, users: str) -> None:
+async def test_call_uses_typed_requests_and_validated_boundary_models(db: PgFacade, users: str) -> None:
     from pgfacade.contracts.requests import parse_request
 
     request = parse_request({"kind": "rows.count", "input": {"table": users}})
@@ -98,7 +98,7 @@ async def test_call_uses_typed_requests_and_validated_boundary_models(db: MyApp,
         parse_request({"kind": "rows.nope", "input": {"table": users}})
 
 
-async def test_select_all_orders_and_counts(db: MyApp, users: str) -> None:
+async def test_select_all_orders_and_counts(db: PgFacade, users: str) -> None:
     page = await successful(
         db.call(RowsSelect(input=RowsSelectInput(table=users, order_by=[OrderBy(column="email", desc=True)], with_total=True)))
     )
@@ -106,7 +106,7 @@ async def test_select_all_orders_and_counts(db: MyApp, users: str) -> None:
     assert page.rowcount == 3 and page.total == 3 and (not page.truncated)
 
 
-async def test_select_columns_limit_offset(db: MyApp, users: str) -> None:
+async def test_select_columns_limit_offset(db: PgFacade, users: str) -> None:
     page = await successful(
         db.call(
             RowsSelect(
@@ -117,17 +117,17 @@ async def test_select_columns_limit_offset(db: MyApp, users: str) -> None:
     assert page.rows == [{"email": "bob@x.io"}] and page.total == 3
 
 
-async def test_schema_qualified_table(db: MyApp, users: str) -> None:
+async def test_schema_qualified_table(db: PgFacade, users: str) -> None:
     assert (await successful(db.call(RowsCount(input=RowsCountInput(table=f"public.{users}"))))).count == 3
 
 
 async def test_truncated_flag_respects_max_rows(users: str) -> None:
-    async with MyApp(make_settings(max_rows=2)) as small:
+    async with PgFacade(make_settings(max_rows=2)) as small:
         page = await successful(small.call(RowsSelect(input=RowsSelectInput(table=users, order_by=[OrderBy(column="id")]))))
     assert len(page.rows) == 2 and page.truncated
 
 
-async def test_match_shorthand_and_casts(db: MyApp, users: str) -> None:
+async def test_match_shorthand_and_casts(db: PgFacade, users: str) -> None:
     assert [
         r["email"] for r in (await successful(db.call(RowsSelect(input=RowsSelectInput(table=users, match={"score": None}))))).rows
     ] == ["cat@x.io"]
@@ -155,12 +155,12 @@ async def test_match_shorthand_and_casts(db: MyApp, users: str) -> None:
         (Not(filter=Cmp(column="email", value="ann@x.io")), {"bob@x.io", "cat@x.io"}),
     ],
 )
-async def test_filters(db: MyApp, users: str, filt, expected: set[str]) -> None:
+async def test_filters(db: PgFacade, users: str, filt, expected: set[str]) -> None:
     page = await successful(db.call(RowsSelect(input=RowsSelectInput(table=users, where=[filt]))))
     assert {r["email"] for r in page.rows} == expected
 
 
-async def test_filter_errors(db: MyApp, users: str) -> None:
+async def test_filter_errors(db: PgFacade, users: str) -> None:
     with fails(match="jsonb or array", code=ErrorCode.INVALID_REQUEST):
         await successful(db.call(RowsSelect(input=RowsSelectInput(table=users, where=[Contains(column="email", value="x")]))))
     with fails(match='column "nope"', code=ErrorCode.INVALID_REQUEST):
@@ -169,7 +169,7 @@ async def test_filter_errors(db: MyApp, users: str) -> None:
         await successful(db.call(RowsSelect(input=RowsSelectInput(table="no_such_table"))))
 
 
-async def test_get_exists_count(db: MyApp, users: str) -> None:
+async def test_get_exists_count(db: PgFacade, users: str) -> None:
     assert (await successful(db.call(RowsGet(input=RowsGetInput(table=users, key=1, columns=["email"]))))).row == {"email": "ann@x.io"}
     assert (await successful(db.call(RowsGet(input=RowsGetInput(table=users, key=999))))).row is None
     assert (await successful(db.call(RowsExists(input=RowsExistsInput(table=users, match={"email": "bob@x.io"}))))).ok
@@ -179,7 +179,7 @@ async def test_get_exists_count(db: MyApp, users: str) -> None:
     ).count == 2
 
 
-async def test_aggregate(db: MyApp, users: str) -> None:
+async def test_aggregate(db: PgFacade, users: str) -> None:
     aggs = [Aggregate(fn="count"), Aggregate(fn="sum", column="score"), Aggregate(fn="max", column="score", alias="top")]
     assert (await successful(db.call(RowsAggregate(input=RowsAggregateInput(table=users, aggregates=aggs))))).rows == [
         {"count": 3, "sum_score": 8, "top": 5}
@@ -199,7 +199,7 @@ async def test_aggregate(db: MyApp, users: str) -> None:
     assert [r["score"] for r in grouped.rows] == [3, 5, None]
 
 
-async def test_insert_returning_and_defaults(db: MyApp, users: str) -> None:
+async def test_insert_returning_and_defaults(db: PgFacade, users: str) -> None:
     res = await successful(
         db.call(RowsInsert(input=RowsInsertInput(table=users, rows=[{"email": "dan@x.io"}], returning=["id", "email", "created_at"])))
     )
@@ -210,7 +210,7 @@ async def test_insert_returning_and_defaults(db: MyApp, users: str) -> None:
     assert [r["score"] for r in res.rows] == [1, None]
 
 
-async def test_upsert_and_do_nothing(db: MyApp, users: str) -> None:
+async def test_upsert_and_do_nothing(db: PgFacade, users: str) -> None:
     res = await successful(
         db.call(
             RowsInsert(
@@ -231,7 +231,7 @@ async def test_upsert_and_do_nothing(db: MyApp, users: str) -> None:
         await successful(db.call(RowsInsert(input=RowsInsertInput(table=users, rows=[{"email": "ann@x.io"}]))))
 
 
-async def test_update_delete_and_guards(db: MyApp, users: str) -> None:
+async def test_update_delete_and_guards(db: PgFacade, users: str) -> None:
     res = await successful(
         db.call(RowsUpdate(input=RowsUpdateInput(table=users, values={"score": 0, "meta": {"plan": "none"}}, match={"email": "bob@x.io"})))
     )
@@ -245,7 +245,7 @@ async def test_update_delete_and_guards(db: MyApp, users: str) -> None:
     assert (await successful(db.call(RowsDelete(input=RowsDeleteInput(table=users, allow_all=True))))).rowcount == 2
 
 
-async def test_transactions(db: MyApp, users: str) -> None:
+async def test_transactions(db: PgFacade, users: str) -> None:
     with fails(code=ErrorCode.CONFLICT, sqlstate="23505"):
         async with db.transaction() as tx:
             await successful(tx.call(RowsUpdate(input=RowsUpdateInput(table=users, values={"score": 99}, match={"id": 1}))))
@@ -260,7 +260,7 @@ async def test_transactions(db: MyApp, users: str) -> None:
     ).row is None
 
 
-async def test_batch_is_atomic_and_checks_permissions_first(db: MyApp, users: str) -> None:
+async def test_batch_is_atomic_and_checks_permissions_first(db: PgFacade, users: str) -> None:
     ok = await successful(
         db.call(
             Batch(
@@ -309,7 +309,7 @@ async def test_batch_is_atomic_and_checks_permissions_first(db: MyApp, users: st
     assert (await successful(db.call(RowsCount(input=RowsCountInput(table=users))))).count == 2
 
 
-async def test_csv_roundtrip(db: MyApp, users: str) -> None:
+async def test_csv_roundtrip(db: PgFacade, users: str) -> None:
     csv = (
         await successful(
             db.call(RowsExportCsv(input=RowsExportCsvInput(table=users, columns=["email", "score"], order_by=[OrderBy(column="id")])))
@@ -323,7 +323,7 @@ async def test_csv_roundtrip(db: MyApp, users: str) -> None:
     assert (await successful(db.call(RowsSelect(input=RowsSelectInput(table=users, match={"email": "ann@x.io"}))))).rows[0]["score"] == 5
 
 
-async def test_query_is_read_only_single_statement_and_capped(db: MyApp, users: str) -> None:
+async def test_query_is_read_only_single_statement_and_capped(db: PgFacade, users: str) -> None:
     res = await successful(
         db.call(SqlQuery(input=SqlQueryInput(sql=f'SELECT email FROM "{users}" WHERE score > %s ORDER BY 1', params=[0])))
     )
@@ -334,13 +334,13 @@ async def test_query_is_read_only_single_statement_and_capped(db: MyApp, users: 
         await successful(db.call(SqlQuery(input=SqlQueryInput(sql="SELECT 1; SELECT 2"))))
     empty = await successful(db.call(SqlQuery(input=SqlQueryInput(sql=f'SELECT email, score FROM "{users}" WHERE false'))))
     assert empty.columns == ["email", "score"] and empty.rows == []
-    async with MyApp(make_settings(max_rows=2)) as small:
+    async with PgFacade(make_settings(max_rows=2)) as small:
         res = await successful(small.call(SqlQuery(input=SqlQueryInput(sql=f'SELECT email FROM "{users}" ORDER BY id'))))
         assert res.rowcount == 2 and res.truncated
         assert (await successful(small.call(SqlQuery(input=SqlQueryInput(sql="SELECT 1 AS one"))))).rows == [{"one": 1}]
 
 
-async def test_execute_explain_and_guards(db: MyApp, users: str) -> None:
+async def test_execute_explain_and_guards(db: PgFacade, users: str) -> None:
     res = await successful(
         db.call(SqlExecute(input=SqlExecuteInput(sql=f'UPDATE "{users}" SET score = %(s)s WHERE id = %(id)s', params={"s": 42, "id": 1})))
     )
@@ -352,20 +352,20 @@ async def test_execute_explain_and_guards(db: MyApp, users: str) -> None:
 
 
 async def test_server_caps(users: str) -> None:
-    async with MyApp(make_settings(read_only=True)) as ro:
+    async with PgFacade(make_settings(read_only=True)) as ro:
         assert (await successful(ro.call(RowsCount(input=RowsCountInput(table=users))))).count == 3
         with fails(match="read-only", code=ErrorCode.FORBIDDEN):
             await successful(ro.call(RowsInsert(input=RowsInsertInput(table=users, rows=[{"email": "x@x.io"}]))))
-    async with MyApp(make_settings(allow_raw_sql=False, allow_ddl=False, allow_admin=False)) as locked:
+    async with PgFacade(make_settings(allow_raw_sql=False, allow_ddl=False, allow_admin=False)) as locked:
         with fails(match="raw SQL", code=ErrorCode.FORBIDDEN):
             await successful(locked.call(SqlQuery(input=SqlQueryInput(sql="SELECT 1"))))
         with fails(match="DDL", code=ErrorCode.FORBIDDEN):
             await successful(locked.call(TableTruncate(input=TableTruncateInput(table=users))))
-        assert not locked.allows(REGISTRY["maint.vacuum"].perm)
-        assert {s.op for s in locked.allowed_ops()} < set(REGISTRY)
+        assert not locked.allows(OPERATIONS["maint.vacuum"].perm)
+        assert {s.op for s in locked.allowed_ops()} < set(OPERATIONS)
 
 
-async def test_principal_flags(db: MyApp, users: str) -> None:
+async def test_principal_flags(db: PgFacade, users: str) -> None:
     reader = db.as_(Principal(name="reader", read_only=True, sql=False, ddl=False))
     assert (await successful(reader.call(RowsCount(input=RowsCountInput(table=users))))).count == 3
     with fails(match="'reader' is read-only", code=ErrorCode.FORBIDDEN):
@@ -381,7 +381,7 @@ async def test_principal_flags(db: MyApp, users: str) -> None:
             tx.as_(Principal(name="x"))
 
 
-async def test_role_binding_enforced_by_postgres(db: MyApp, users: str) -> None:
+async def test_role_binding_enforced_by_postgres(db: PgFacade, users: str) -> None:
     """A principal with a Postgres role runs under SET LOCAL ROLE, so GRANTs decide what it can do."""
     role = f"{users}_reader"
     await successful(db.call(SqlExecute(input=SqlExecuteInput(sql=f'CREATE ROLE "{role}" NOLOGIN'))))
@@ -401,7 +401,7 @@ async def test_role_binding_enforced_by_postgres(db: MyApp, users: str) -> None:
         await successful(db.call(SqlExecute(input=SqlExecuteInput(sql=f'DROP ROLE "{role}"'))))
 
 
-async def test_read_only_holds_inside_transactions(db: MyApp, users: str) -> None:
+async def test_read_only_holds_inside_transactions(db: PgFacade, users: str) -> None:
     async with db.transaction() as tx:
         await successful(tx.call(RowsUpdate(input=RowsUpdateInput(table=users, values={"score": 1}, match={"id": 1}))))
         with fails(code=ErrorCode.FORBIDDEN, sqlstate="25006"):
@@ -413,7 +413,7 @@ async def test_read_only_holds_inside_transactions(db: MyApp, users: str) -> Non
     ).count == 3
 
 
-async def test_explain_analyze_cannot_execute_writes(db: MyApp, users: str) -> None:
+async def test_explain_analyze_cannot_execute_writes(db: PgFacade, users: str) -> None:
     reader = db.as_(Principal(name="explain-reader", read_only=True, sql=True))
     with fails(code=ErrorCode.FORBIDDEN, sqlstate="25006"):
         await successful(reader.call(SqlExplain(input=SqlExplainInput(sql=f'DELETE FROM "{users}"', analyze=True))))

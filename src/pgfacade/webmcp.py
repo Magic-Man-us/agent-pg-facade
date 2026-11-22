@@ -30,8 +30,8 @@ from pgfacade.contracts.envelopes import Failure
 from pgfacade.contracts.requests import Batch
 from pgfacade.contracts.schema import TableList, TableListInput
 from pgfacade.contracts.types import NonEmptyItems
+from pgfacade.facade import PgFacade
 from pgfacade.infrastructure.startup import startup_command
-from pgfacade.myapp import MyApp
 from pgfacade.presentation.middleware import RequestBodyLimit
 from pgfacade.shared.enums import McpTransport
 from pgfacade.shared.types import McpHttpTransport, McpLifespanState
@@ -53,7 +53,7 @@ pg_migration_revision + pg_migration_run for schema changes in a tracked project
 _TABLE_SUMMARY_LIMIT = 50
 
 
-async def _table_summary(db: MyApp) -> str:
+async def _table_summary(db: PgFacade) -> str:
     response = await db.call(TableList(input=TableListInput(limit=_TABLE_SUMMARY_LIMIT)))
     if isinstance(response.outcome, Failure) or not response.outcome.data.items:
         return ""
@@ -96,7 +96,9 @@ async def resolve_mcp_context(settings: PgSettings, provider: IdentityProvider |
     return ExecutionContext(principal=await authenticate(settings, key, provider), provenance=ExecutionProvenance.MCP)
 
 
-def _tool_for(spec: OpSpec, app: MyApp, resolve_context: Callable[[], Awaitable[ExecutionContext]]) -> Callable[..., Awaitable[ToolResult]]:
+def _tool_for(
+    spec: OpSpec, app: PgFacade, resolve_context: Callable[[], Awaitable[ExecutionContext]]
+) -> Callable[..., Awaitable[ToolResult]]:
     async def tool(request: RequestContract[Contract]) -> ToolResult:
         try:
             context = await resolve_context()
@@ -131,12 +133,14 @@ def _batch_parameters(specs: Sequence[OpSpec]) -> dict[str, JsonValue]:
     return create_model("BatchArguments", __base__=Contract, request=(batch, ...)).model_json_schema()
 
 
-def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, identity_provider: IdentityProvider | None = None) -> FastMCP:
+def create_mcp(
+    settings: PgSettings | None = None, db: PgFacade | None = None, identity_provider: IdentityProvider | None = None
+) -> FastMCP:
     settings = settings or (db.settings if db is not None else PgSettings())
     if db is not None and db.settings != settings:
         raise ValueError("The supplied facade must use the server settings")
     provider = configure_identity_provider(settings, identity_provider)
-    db = db or MyApp(settings)
+    db = db or PgFacade(settings)
     discovery = ExecutionContext(principal=ANONYMOUS, provenance=ExecutionProvenance.MCP)
 
     @asynccontextmanager
@@ -185,7 +189,7 @@ def create_mcp(settings: PgSettings | None = None, db: MyApp | None = None, iden
 
 def create_mcp_http_app(
     settings: PgSettings | None = None,
-    db: MyApp | None = None,
+    db: PgFacade | None = None,
     identity_provider: IdentityProvider | None = None,
     *,
     transport: McpHttpTransport = McpTransport.HTTP,

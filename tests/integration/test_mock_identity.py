@@ -14,7 +14,7 @@ from fastmcp import Client
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from pgfacade import MyApp, PgSettings, Principal, Unauthenticated
+from pgfacade import PgFacade, PgSettings, Principal, Unauthenticated
 from pgfacade.application.errors import IdentityProviderNotConfigured
 from pgfacade.authorization.contracts import IdentityLookupRequest
 from pgfacade.authorization.models import (
@@ -188,7 +188,7 @@ async def test_http_mcp_resolves_request_mock_credential(mock_settings: PgSettin
     assert db.principal.identity == BOB
 
 
-class InMemoryFacade(MyApp):
+class InMemoryFacade(PgFacade):
     async def open(self) -> None:
         return None
 

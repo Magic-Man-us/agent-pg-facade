@@ -29,14 +29,14 @@ async def _check() -> int:
     from pgfacade.contracts.admin import ServerInfoGet, ServerInfoGetInput
     from pgfacade.contracts.envelopes import Failure
     from pgfacade.contracts.schema import TableList, TableListInput
-    from pgfacade.myapp import MyApp
+    from pgfacade.facade import PgFacade
 
     settings = PgSettings(pool_min=1, pool_max=1, pool_timeout_s=CHECK_TIMEOUT_S)
     try:
         # One direct attempt reports the driver's reason at once; the pool would retry and report only a timeout.
         probe = await psycopg.AsyncConnection.connect(settings.dsn.get_secret_value(), connect_timeout=int(CHECK_TIMEOUT_S))
         await probe.close()
-        async with MyApp(settings) as app:
+        async with PgFacade(settings) as app:
             info = await app.call(ServerInfoGet(input=ServerInfoGetInput()))
             tables = await app.call(TableList(input=TableListInput()))
             tools = len(app.allowed_ops())
@@ -82,10 +82,10 @@ def main(argv: CommandArguments | None = None) -> None:
     elif command.cmd == CliOperation.CHECK:
         sys.exit(asyncio.run(_check()))
     elif command.cmd == CliOperation.OPS:
-        from pgfacade.application.registry import REGISTRY
+        from pgfacade.application.registry import OPERATIONS
 
-        width = max(len(op) for op in REGISTRY)
-        for spec in REGISTRY.values():
+        width = max(len(op) for op in OPERATIONS)
+        for spec in OPERATIONS.values():
             flags = ",".join(spec.perm.flags()) or "read"
             sys.stdout.write(f"{spec.op:<{width}}  {flags:<22} {spec.summary}\n")
     elif command.cmd == CliOperation.API:

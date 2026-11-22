@@ -2,16 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import inspect
 import logging
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
+from collections.abc import AsyncGenerator
 from contextlib import aclosing
-from functools import singledispatchmethod
 from typing import cast
 
 from pgfacade.application.context import ExecutionContext
 from pgfacade.application.errors import Forbidden, InvalidRequest, error_payload
-from pgfacade.application.registry import LISTEN, REGISTRY, OpSpec, op
+from pgfacade.application.registry import LISTEN, OPERATIONS, OpSpec, op
 from pgfacade.application.types import ExecutionProvenance
 from pgfacade.authorization.engine import PolicyEngine
 from pgfacade.authorization.models import AuthorizationContext, AuthorizationDecision
@@ -22,7 +20,7 @@ from pgfacade.contracts.enums import MaintenanceKind, Operation, OperationHint, 
 from pgfacade.contracts.envelopes import Failure, ResponseEnvelope, Success
 from pgfacade.contracts.events import EventWait, EventWaitInput, Notification
 from pgfacade.contracts.lifecycle import LifecycleList, LifecycleListInput, LifecycleRun, LifecycleRunInput
-from pgfacade.contracts.requests import REQUEST_TYPES, Batch, BatchResult, Request
+from pgfacade.contracts.requests import Batch, BatchResult, Request
 from pgfacade.contracts.streaming import EventStreamRequest, EventStreamResponse
 from pgfacade.infrastructure.postgres.engine import Core
 
@@ -45,7 +43,7 @@ class _BatchFailure(Exception):
         super().__init__(outcome.error.message)
 
 
-class MyApp(Core):
+class PgFacade(Core):
     def __init__(self, settings: PgSettings | None = None) -> None:
         super().__init__(settings)
         self._execution_context: ExecutionContext | None = None
@@ -80,10 +78,6 @@ class MyApp(Core):
                 if response.outcome.status == Outcome.ERROR:
                     log.warning("Lifecycle sweep failed: %s", response.outcome.error.code)
 
-    @singledispatchmethod
-    async def _execute(self, request: RequestContract[Contract]) -> Contract:
-        raise InvalidRequest(f"Unsupported request type {type(request).__name__}")
-
     async def call[ResultT: Contract](
         self, request: RequestContract[ResultT], context: ExecutionContext | None = None
     ) -> ResponseEnvelope[ResultT]:
@@ -93,7 +87,7 @@ class MyApp(Core):
             execution.require(spec.perm)
             if execution.in_transaction and _requires_autocommit(cast(Request, request), spec):
                 raise InvalidRequest(f"{spec.op} cannot run inside a transaction")
-            envelope = spec.envelope(kind=request.kind, outcome=Success(data=await execution._execute(request)))
+            envelope = spec.envelope(kind=request.kind, outcome=Success(data=await spec.handler(execution, request)))
         except _BatchFailure as error:
             return ResponseEnvelope(kind=request.kind, outcome=error.outcome)
         except Exception as error:
@@ -103,15 +97,16 @@ class MyApp(Core):
 
     @staticmethod
     def spec_for(request: RequestContract[Contract]) -> OpSpec:
-        spec = REGISTRY.get(request.kind)
+        spec = OPERATIONS.get(request.kind)
         if spec is None or not isinstance(request, spec.request):
             raise InvalidRequest(f"Unsupported request type {type(request).__name__}")
-        dispatcher = execution_dispatcher().dispatcher
-        if dispatcher.dispatch(type(request)) is not dispatcher.dispatch(spec.request):
-            raise InvalidRequest("Request inheritance does not match its operation contract")
+        if type(request) is not spec.request:
+            registered = {known.request for known in OPERATIONS.values()}
+            if sum(base in registered for base in type(request).__mro__) > 1:
+                raise InvalidRequest("Request inheritance does not match its operation contract")
         return spec
 
-    def _with_context(self, context: ExecutionContext | None) -> MyApp:
+    def _with_context(self, context: ExecutionContext | None) -> PgFacade:
         if context is None:
             return self
         if self.in_transaction:
@@ -130,7 +125,7 @@ class MyApp(Core):
             execution_identity=self._principal.execution_identity if self.in_transaction else None,
         )
 
-    def _bind_execution(self, decision: AuthorizationDecision) -> MyApp:
+    def _bind_execution(self, decision: AuthorizationDecision) -> PgFacade:
         if self.in_transaction and self._principal.role != decision.profile.role:
             raise Forbidden("Cannot change the database identity inside a transaction")
         bound = copy.copy(self)
@@ -139,7 +134,7 @@ class MyApp(Core):
         bound._principal = Principal.model_validate(values)
         return bound
 
-    def _authorized_view(self, request: Request) -> MyApp:
+    def _authorized_view(self, request: Request) -> PgFacade:
         identity = self._principal.identity
         if identity is None:
             return self
@@ -155,7 +150,7 @@ class MyApp(Core):
         execution = self._with_context(context)
         identity = execution._principal.identity
         if identity is None:
-            return [spec for spec in REGISTRY.values() if execution.allows(spec.perm)]
+            return [spec for spec in OPERATIONS.values() if execution.allows(spec.perm)]
         config = execution.settings.access_control
         if config is None:
             return []
@@ -163,7 +158,7 @@ class MyApp(Core):
         authorization = execution._authorization_context()
         return [
             spec
-            for spec in REGISTRY.values()
+            for spec in OPERATIONS.values()
             if any(execution._bind_execution(decision).allows(spec.perm) for decision in engine.discover(spec.op, identity, authorization))
         ]
 
@@ -193,17 +188,8 @@ class MyApp(Core):
             yield EventStreamResponse(outcome=error_payload(error))
 
 
-def execution_dispatcher() -> singledispatchmethod[Awaitable[Contract]]:
-    # functools stores registration metadata on the descriptor before binding it as a method.
-    return cast("singledispatchmethod[Awaitable[Contract]]", inspect.getattr_static(MyApp, "_execute"))
-
-
-def registered_handlers() -> Mapping[type[object], Callable[..., Awaitable[Contract]]]:
-    return execution_dispatcher().dispatcher.registry
-
-
 @op(Batch, response=BatchResult, hint=OperationHint.DESTRUCTIVE)
-async def run_batch(db: MyApp, request: Batch) -> BatchResult:
+async def run_batch(db: PgFacade, request: Batch) -> BatchResult:
     for child in request.input.requests:
         if isinstance(child, Batch):
             raise InvalidRequest("nested batches are not allowed")
@@ -221,21 +207,4 @@ async def run_batch(db: MyApp, request: Batch) -> BatchResult:
     return BatchResult(results=results)
 
 
-def check_registry() -> None:
-    handlers = registered_handlers()
-    known = {model.model_fields["kind"].default: model for model in REQUEST_TYPES}
-    if set(known) != set(REGISTRY):
-        raise RuntimeError("Operation catalog does not match the request union")
-    if set(handlers) - {object} != set(REQUEST_TYPES):
-        raise RuntimeError("Executable dispatch registrations do not match the request union")
-    for name, model in known.items():
-        if REGISTRY[name].request is not model:
-            raise RuntimeError(f"Catalog request mismatch for {name}")
-    names = {(function.__module__, function.__qualname__) for model, function in handlers.items() if model is not object}
-    if len(names) != len(REQUEST_TYPES):
-        raise RuntimeError("Operation handlers must have unique qualified names")
-
-
-from pgfacade.application import operations  # noqa: E402,F401  # Registers handlers after MyApp exists.
-
-check_registry()
+from pgfacade.application import operations  # noqa: E402,F401  # Registered after batch.run to keep catalog order.

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from pgfacade import MyApp
+from pgfacade import PgFacade
 from pgfacade.contracts.admin import (
     MaintReindex,
     MaintReindexInput,
@@ -38,7 +38,7 @@ from tests.support import fails, successful
 @pytest.mark.integration
 async def test_migration_batch_cannot_commit_outside_its_transaction(users: TableName, tmp_path: Path, clean_alembic: None) -> None:
     table = unique("outside_batch")
-    async with MyApp(make_settings(migrations_dir=tmp_path)) as db:
+    async with PgFacade(make_settings(migrations_dir=tmp_path)) as db:
         await successful(db.call(MigrationInit(input=MigrationInitInput())))
         await successful(
             db.call(
@@ -80,7 +80,7 @@ async def test_migration_batch_cannot_commit_outside_its_transaction(users: Tabl
 @pytest.mark.integration
 async def test_explicit_transaction_rejects_migration_file_creation(tmp_path: Path) -> None:
     directory = tmp_path / "not-created"
-    async with MyApp(make_settings(migrations_dir=directory)) as db:
+    async with PgFacade(make_settings(migrations_dir=directory)) as db:
         async with db.transaction() as tx:
             with fails(match="cannot run inside a transaction", code=ErrorCode.INVALID_REQUEST):
                 await successful(tx.call(MigrationInit(input=MigrationInitInput())))
@@ -88,7 +88,7 @@ async def test_explicit_transaction_rejects_migration_file_creation(tmp_path: Pa
 
 
 @pytest.mark.integration
-async def test_schema_reindex_runs_outside_transaction(db: MyApp) -> None:
+async def test_schema_reindex_runs_outside_transaction(db: PgFacade) -> None:
     schema = unique("reindex_schema")
     await successful(db.call(SchemaCreate(input=SchemaCreateInput(name=schema))))
     try:

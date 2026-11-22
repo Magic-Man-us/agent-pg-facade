@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import TypeAdapter
 
-from pgfacade import REGISTRY, ErrorCode, Operation, Outcome, Perm, ResponseEnvelope, Success
+from pgfacade import OPERATIONS, ErrorCode, Operation, Outcome, Perm, ResponseEnvelope, Success
 from pgfacade.application.errors import Forbidden, error_payload
 from pgfacade.contracts.base import Count
 from pgfacade.contracts.envelopes import ApiError, Failure
@@ -14,13 +14,13 @@ from pgfacade.contracts.rows import RowsSelect
 
 def test_operation_enum_covers_registry_and_every_request_discriminator() -> None:
     assert issubclass(Operation, StrEnum)
-    assert set(Operation) == set(REGISTRY)
+    assert set(Operation) == set(OPERATIONS)
     assert len(REQUEST_TYPES) == len(Operation)
     for request_model in REQUEST_TYPES:
         field = request_model.model_fields["kind"]
         operation = field.default
         assert isinstance(operation, Operation)
-        assert REGISTRY[operation].request is request_model
+        assert OPERATIONS[operation].request is request_model
         adapter = TypeAdapter(field.annotation)
         assert adapter.validate_python(operation.value) is operation
         assert adapter.validate_python(operation) is operation
