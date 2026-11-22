@@ -4,6 +4,45 @@ A typed PostgreSQL API shared by REST, MCP, and Python callers. Requests are Pyd
 
 For deployment instructions, see the [deployment guide](deploy/README.md).
 
+## Use it with an AI assistant
+
+PGFacade runs as a local MCP server. The assistant gets typed tools such as `pg_table_describe`, `pg_rows_select`, and `pg_rows_count` instead of a raw SQL connection.
+
+You need [uv](https://docs.astral.sh/uv/) and a PostgreSQL database you can connect to.
+
+1. Generate a key:
+
+   ```sh
+   uvx --from git+https://github.com/Magic-Man-us/agent-pg-facade pgfacade keygen
+   ```
+
+2. Register the server. For Claude Code, add this to `.mcp.json` in your project, replacing `YOUR_KEY` in both places and the connection string:
+
+   ```json
+   {
+     "mcpServers": {
+       "postgres": {
+         "command": "uvx",
+         "args": ["--from", "git+https://github.com/Magic-Man-us/agent-pg-facade", "pgfacade", "mcp"],
+         "env": {
+           "PGFACADE_DSN": "postgresql://user@localhost:5432/mydb",
+           "PGFACADE_KEYS": "{\"YOUR_KEY\": {\"name\": \"assistant\"}}",
+           "PGFACADE_MCP_KEY": "YOUR_KEY",
+           "PGFACADE_READ_ONLY": "true"
+         }
+       }
+     }
+   }
+   ```
+
+   Claude Desktop and other MCP clients take the same `command`, `args`, and `env` in their own configuration file.
+
+3. Ask the assistant something about your data, for example "describe the `orders` table and count rows created this week".
+
+`PGFACADE_READ_ONLY=true` exposes 20 read tools and runs every transaction read-only. Remove it to add six write tools, including `pg_rows_insert`, `pg_rows_update`, and `pg_rows_delete`. Raw SQL, schema changes, admin operations, migrations, and notifications stay off until you enable their flag in [Permissions](#permissions).
+
+The assistant acts as the database user in `PGFACADE_DSN`. To restrict it further, add `"role": "some_role"` to the key's entry, make the database user a member of that role, and grant the role only what the assistant may touch. Run `pgfacade ops` to list every operation and the permission it needs.
+
 ## API contract: version 0.5
 
 Python, HTTP, and MCP share the application-owned operation contract:
