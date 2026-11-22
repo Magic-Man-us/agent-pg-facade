@@ -41,7 +41,7 @@ trap 'exit 143' TERM
 
 mkdir "$SOURCE"
 tar --exclude=__pycache__ --exclude='*.pyc' -C "$CHECKOUT" -cf - \
-    src tests deploy/check-service.py pyproject.toml uv.lock README.md docs/access-control.md \
+    src tests deploy/check-service.py pyproject.toml uv.lock README.md LICENSE docs/access-control.md \
     docs/examples/mock-access.yaml docs/examples/mock-access.toml \
     | tar -C "$SOURCE" -xf -
 cd "$SOURCE"

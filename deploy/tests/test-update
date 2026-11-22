@@ -86,7 +86,7 @@ for test_case in success failure; do
     printf 'new unit\n' > "$checkout/deploy/pgfacade.service"
     printf 'synthetic checker\n' > "$checkout/deploy/check-service.py"
     printf '#!/usr/bin/env bash\n[[ "$FAIL_ACCEPTANCE" == 0 ]]\n' > "$checkout/deploy/check-host"
-    touch "$checkout/pyproject.toml" "$checkout/uv.lock" "$checkout/README.md" \
+    touch "$checkout/pyproject.toml" "$checkout/uv.lock" "$checkout/README.md" "$checkout/LICENSE" \
         "$checkout/docs/access-control.md" "$checkout/docs/examples/mock-access.yaml" "$checkout/docs/examples/mock-access.toml"
     sed \
         -e "s|^readonly APP_ROOT=.*|readonly APP_ROOT=$app|" \
