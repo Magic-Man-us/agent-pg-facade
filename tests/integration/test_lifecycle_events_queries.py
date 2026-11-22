@@ -24,6 +24,13 @@ from pgfacade.contracts.events import (
     EventWatchListInput,
 )
 from pgfacade.contracts.lifecycle import (
+    AllPolicies,
+    ArchiveRows,
+    ArchiveRowsInput,
+    CronSchedule,
+    DeleteRows,
+    ExpiresAt,
+    ExpiresIn,
     LifecycleInstall,
     LifecycleInstallInput,
     LifecycleList,
@@ -42,6 +49,12 @@ from pgfacade.contracts.lifecycle import (
     LifecycleScheduleInput,
     LifecycleTableExpiry,
     LifecycleTableExpiryInput,
+    NoSchedule,
+    OnePolicy,
+    RowAge,
+    RowAgeInput,
+    RowDeadline,
+    RowDeadlineInput,
 )
 from pgfacade.contracts.queries import QueryList, QueryListInput, QueryReload, QueryReloadInput, QueryRun, QueryRunInput
 from pgfacade.contracts.rows import (
@@ -77,22 +90,25 @@ async def lifecycle(db: PgFacade) -> AsyncIterator[PgFacade]:
 async def test_install_is_idempotent_and_list_reports_state(lifecycle: PgFacade) -> None:
     assert (await successful(lifecycle.call(LifecycleInstall(input=LifecycleInstallInput())))).status == "INSTALLED"
     listing = await successful(lifecycle.call(LifecycleList(input=LifecycleListInput())))
-    assert listing.installed and listing.items == [] and (listing.scheduled is None)
+    assert listing.installed and listing.items == [] and listing.schedule == NoSchedule()
     with fails(match="pg_cron", code=ErrorCode.NOT_FOUND):
-        await successful(lifecycle.call(LifecycleSchedule(input=LifecycleScheduleInput(cron="*/5 * * * *"))))
+        await successful(lifecycle.call(LifecycleSchedule(input=LifecycleScheduleInput(schedule=CronSchedule(expression="*/5 * * * *")))))
 
 
 async def test_row_ttl_delete_with_preview_history_and_event(lifecycle: PgFacade, users: str) -> None:
     db = lifecycle
     await age_rows(db, users, ["ann@x.io", "bob@x.io"], days=10)
-    policy = await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="created_at", ttl="7 days"))))
-    assert policy.kind == "row_ttl" and policy.action == "delete" and (policy.ttl == "7 days") and (policy.last_run_at is None)
+    policy = await successful(
+        db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, expiry=RowAgeInput(column="created_at", ttl="7 days"))))
+    )
+    assert policy.kind == "row_ttl" and policy.action == DeleteRows() and policy.last_run_at is None
+    assert policy.expiry == RowAge(column="created_at", ttl="7 days")
     assert (await successful(db.call(LifecyclePreview(input=LifecyclePreviewInput(policy_id=policy.id))))).count == 2
     waiter = asyncio.create_task(
         successful(db.call(EventWait(input=EventWaitInput(channels=[db.settings.lifecycle_channel], timeout_s=5, max_events=1))))
     )
     await asyncio.sleep(0.3)
-    report = await successful(db.call(LifecycleRun(input=LifecycleRunInput(policy_id=policy.id))))
+    report = await successful(db.call(LifecycleRun(input=LifecycleRunInput(target=OnePolicy(policy_id=policy.id)))))
     assert [(o.policy_id, o.rows_affected, o.error) for o in report.items] == [(policy.id, 2, None)]
     assert (await successful(db.call(RowsCount(input=RowsCountInput(table=users))))).count == 1
     event = json.loads((await waiter).items[0].payload)
@@ -101,7 +117,9 @@ async def test_row_ttl_delete_with_preview_history_and_event(lifecycle: PgFacade
     assert len(runs) == 1 and runs[0].rows_affected == 2 and (runs[0].action == "delete") and (runs[0].error is None)
     listed = (await successful(db.call(LifecycleList(input=LifecycleListInput())))).items[0]
     assert listed.last_rows == 2 and listed.last_run_at is not None
-    assert (await successful(db.call(LifecycleRun(input=LifecycleRunInput(policy_id=policy.id))))).items[0].rows_affected == 0
+    assert (await successful(db.call(LifecycleRun(input=LifecycleRunInput(target=OnePolicy(policy_id=policy.id)))))).items[
+        0
+    ].rows_affected == 0
     assert (await successful(db.call(LifecyclePreview(input=LifecyclePreviewInput(policy_id=policy.id))))).count == 0
 
 
@@ -109,10 +127,16 @@ async def test_row_ttl_archive(lifecycle: PgFacade, users: str) -> None:
     db = lifecycle
     await age_rows(db, users, ["ann@x.io", "bob@x.io"], days=40)
     policy = await successful(
-        db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="created_at", ttl="30 days", action="archive")))
+        db.call(
+            LifecycleRowTtl(
+                input=LifecycleRowTtlInput(table=users, expiry=RowAgeInput(column="created_at", ttl="30 days"), action=ArchiveRowsInput())
+            )
+        )
     )
-    assert policy.action == "archive" and policy.archive_table == f"public.{users}_archive"
-    assert (await successful(db.call(LifecycleRun(input=LifecycleRunInput(policy_id=policy.id))))).items[0].rows_affected == 2
+    assert policy.action == ArchiveRows(table=f"public.{users}_archive")
+    assert (await successful(db.call(LifecycleRun(input=LifecycleRunInput(target=OnePolicy(policy_id=policy.id)))))).items[
+        0
+    ].rows_affected == 2
     assert (await successful(db.call(RowsCount(input=RowsCountInput(table=users))))).count == 1
     archived = await successful(db.call(RowsSelect(input=RowsSelectInput(table=f"{users}_archive"))))
     assert {r["email"] for r in archived.rows} == {"ann@x.io", "bob@x.io"} and all(r["archived_at"] for r in archived.rows)
@@ -131,14 +155,20 @@ async def test_row_ttl_expiry_column_batches_and_add_column(lifecycle: PgFacade,
             )
         )
     )
-    policy = await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="expires_at", batch_size=1))))
-    assert policy.ttl is None
-    assert (await successful(db.call(LifecycleRun(input=LifecycleRunInput(policy_id=policy.id))))).items[0].rows_affected == 2
+    policy = await successful(
+        db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, expiry=RowDeadlineInput(column="expires_at"), batch_size=1)))
+    )
+    assert policy.expiry == RowDeadline(column="expires_at")
+    assert (await successful(db.call(LifecycleRun(input=LifecycleRunInput(target=OnePolicy(policy_id=policy.id)))))).items[
+        0
+    ].rows_affected == 2
     assert [r["email"] for r in (await successful(db.call(RowsSelect(input=RowsSelectInput(table=users))))).rows] == ["cat@x.io"]
     added = await successful(
-        db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="seen_at", ttl="1 day", add_column=True)))
+        db.call(
+            LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, expiry=RowAgeInput(column="seen_at", ttl="1 day", add_column=True)))
+        )
     )
-    assert added.column_name == "seen_at"
+    assert added.expiry == RowAge(column="seen_at", ttl="1 day")
     assert "seen_at" in {c for c in (await successful(db.call(RowsSelect(input=RowsSelectInput(table=users))))).columns}
     assert (await successful(db.call(LifecyclePreview(input=LifecyclePreviewInput(policy_id=added.id))))).count == 0
 
@@ -151,14 +181,19 @@ async def test_table_expiry(lifecycle: PgFacade) -> None:
         await successful(db.call(RowsInsert(input=RowsInsertInput(table=t, rows=[{"id": 1}]))))
     try:
         drop = await successful(
-            db.call(LifecycleTableExpiry(input=LifecycleTableExpiryInput(table=doomed, expires_in="0 seconds", action="drop")))
+            db.call(
+                LifecycleTableExpiry(input=LifecycleTableExpiryInput(table=doomed, expiry=ExpiresIn(interval="0 seconds"), action="drop"))
+            )
         )
         trunc = await successful(
-            db.call(LifecycleTableExpiry(input=LifecycleTableExpiryInput(table=kept, expires_at="2000-01-01T00:00:00Z")))
+            db.call(LifecycleTableExpiry(input=LifecycleTableExpiryInput(table=kept, expiry=ExpiresAt(time="2000-01-01T00:00:00Z"))))
         )
         assert drop.expires_at is not None and trunc.action == "truncate"
         assert (await successful(db.call(LifecyclePreview(input=LifecyclePreviewInput(policy_id=drop.id))))).count == 1
-        outcomes = {o.policy_id: o.rows_affected for o in (await successful(db.call(LifecycleRun(input=LifecycleRunInput())))).items}
+        outcomes = {
+            o.policy_id: o.rows_affected
+            for o in (await successful(db.call(LifecycleRun(input=LifecycleRunInput(target=AllPolicies()))))).items
+        }
         assert outcomes[drop.id] == 1 and outcomes[trunc.id] == 1
         with fails(code=ErrorCode.NOT_FOUND):
             await successful(db.call(RowsCount(input=RowsCountInput(table=doomed))))
@@ -172,13 +207,15 @@ async def test_table_expiry(lifecycle: PgFacade) -> None:
 async def test_lifecycle_validation_and_errors(lifecycle: PgFacade, users: str) -> None:
     db = lifecycle
     with fails(match="needs a timestamp", code=ErrorCode.INVALID_REQUEST):
-        await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="email", ttl="1 day"))))
+        await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, expiry=RowAgeInput(column="email", ttl="1 day")))))
     with fails(match="add_column=true", code=ErrorCode.INVALID_REQUEST):
-        await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="nope"))))
+        await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, expiry=RowDeadlineInput(column="nope")))))
     with fails(code=ErrorCode.NOT_FOUND):
-        await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table="no_such_table", column="created_at"))))
-    with pytest.raises(ValidationError, match="exactly one"):
-        await successful(db.call(LifecycleTableExpiry(input=LifecycleTableExpiryInput(table=users))))
+        await successful(
+            db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table="no_such_table", expiry=RowDeadlineInput(column="created_at"))))
+        )
+    with pytest.raises(ValidationError, match="expiry"):
+        LifecycleTableExpiryInput.model_validate({"table": users})
     with fails(code=ErrorCode.NOT_FOUND):
         await successful(db.call(LifecycleRemove(input=LifecycleRemoveInput(policy_id=999999))))
     with fails(code=ErrorCode.NOT_FOUND):
@@ -186,7 +223,7 @@ async def test_lifecycle_validation_and_errors(lifecycle: PgFacade, users: str) 
     with fails(code=ErrorCode.FORBIDDEN):
         await successful(
             db.as_(Principal(name="ro", read_only=True, admin=True)).call(
-                LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="created_at", ttl="1 day"))
+                LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, expiry=RowAgeInput(column="created_at", ttl="1 day")))
             )
         )
     victim = unique("victim")
@@ -195,9 +232,11 @@ async def test_lifecycle_validation_and_errors(lifecycle: PgFacade, users: str) 
             TableCreate(input=TableCreateInput(table=victim, columns=[ColumnSpec(name="at", type="timestamptz", default_expr="now()")]))
         )
     )
-    policy = await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=victim, column="at", ttl="1 day"))))
+    policy = await successful(
+        db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=victim, expiry=RowAgeInput(column="at", ttl="1 day"))))
+    )
     await successful(db.call(TableDrop(input=TableDropInput(table=victim))))
-    outcome = (await successful(db.call(LifecycleRun(input=LifecycleRunInput(policy_id=policy.id))))).items[0]
+    outcome = (await successful(db.call(LifecycleRun(input=LifecycleRunInput(target=OnePolicy(policy_id=policy.id)))))).items[0]
     assert outcome.rows_affected == 0 and outcome.error and ("does not exist" in outcome.error)
     assert (await successful(db.call(LifecycleRuns(input=LifecycleRunsInput(policy_id=policy.id))))).items[0].error == outcome.error
 
@@ -206,7 +245,9 @@ async def test_background_sweeper(users: str) -> None:
     async with PgFacade(make_settings(lifecycle_sweep_s=0.2)) as db:
         await successful(db.call(LifecycleInstall(input=LifecycleInstallInput())))
         await age_rows(db, users, ["ann@x.io"], days=3)
-        policy = await successful(db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, column="created_at", ttl="1 day"))))
+        policy = await successful(
+            db.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table=users, expiry=RowAgeInput(column="created_at", ttl="1 day"))))
+        )
         try:
             for _ in range(50):
                 await asyncio.sleep(0.1)

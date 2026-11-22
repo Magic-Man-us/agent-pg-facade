@@ -8,21 +8,27 @@ with a NOTIFY on the lifecycle channel.
 
 from __future__ import annotations
 
-from psycopg import sql
+from typing import assert_never
+
 from pydantic import TypeAdapter
 
 from pgfacade.application.errors import InvalidRequest, NotFound
 from pgfacade.application.registry import ADMIN, ADMIN_WRITE, DDL, op
 from pgfacade.configuration.settings import META_SCHEMA as M
 from pgfacade.contracts.base import Count, Done, Flag
-from pgfacade.contracts.enums import LifecycleAction, LifecycleKind, OperationHint, OperationStatus
+from pgfacade.contracts.enums import OperationHint, OperationStatus
 from pgfacade.contracts.lifecycle import (
     LIFECYCLE_POLICY_ADAPTER,
+    AllPolicies,
+    ArchiveRowsInput,
+    CronSchedule,
+    DeleteRows,
+    ExpiresAt,
+    ExpiresIn,
     LifecycleInstall,
     LifecycleList,
     LifecyclePolicy,
     LifecyclePolicyList,
-    LifecyclePolicyWrite,
     LifecyclePreview,
     LifecycleRemove,
     LifecycleRowTtl,
@@ -34,21 +40,21 @@ from pgfacade.contracts.lifecycle import (
     LifecycleRuns,
     LifecycleSchedule,
     LifecycleTableExpiry,
+    NoSchedule,
+    OnePolicy,
+    RowAgeInput,
+    RowDeadlineInput,
     RowTtlPolicy,
     TableExpiryPolicy,
 )
-from pgfacade.contracts.types import (
-    CronExpression,
-    LifecyclePolicyId,
-    OperationFlag,
-    TableName,
-)
+from pgfacade.contracts.types import EventDateTime, LifecyclePolicyId, OperationFlag, TableName
 from pgfacade.infrastructure.postgres.engine import Conn, Core
 from pgfacade.infrastructure.postgres.queries import Statement
 from pgfacade.infrastructure.postgres.queries import lifecycle as lifecycle_sql
+from pgfacade.infrastructure.postgres.queries.composition import TableMeta
 
 CRON_JOB = "pgfacade_lifecycle"
-_CRON_SCHEDULE = TypeAdapter(CronExpression | None)
+_EXPIRY_TIME = TypeAdapter(EventDateTime)
 _TIME_TYPES = ("timestamp with time zone", "timestamp without time zone", "date")
 
 
@@ -65,6 +71,13 @@ async def _require_installed(db: Core) -> None:
 async def _has_cron(db: Core) -> OperationFlag:
     result = await db.read(Statement.LIFECYCLE_CRON_EXTENSION_EXISTS.text)
     return len(result.rows) > 0
+
+
+async def _schedule(db: Core) -> CronSchedule | NoSchedule:
+    if not await _has_cron(db):
+        return NoSchedule()
+    cron = await db.read(Statement.LIFECYCLE_CRON.text)
+    return CronSchedule.model_validate({"expression": cron.rows[0]["schedule"]}) if cron.rows else NoSchedule()
 
 
 async def _policy(db: Core, policy_id: LifecyclePolicyId) -> LifecyclePolicy:
@@ -89,93 +102,85 @@ async def list_policies(db: Core, req: LifecycleList) -> LifecyclePolicyList:
     if not await _installed(db):
         return LifecyclePolicyList(items=[], installed=False)
     result = await db.read(Statement.LIFECYCLE_LIST.text)
-    scheduled: CronExpression | None = None
-    if await _has_cron(db):
-        cron = await db.read(Statement.LIFECYCLE_CRON.text)
-        scheduled = _CRON_SCHEDULE.validate_python(cron.rows[0]["schedule"]) if cron.rows else None
     return LifecyclePolicyList(
-        items=[LIFECYCLE_POLICY_ADAPTER.validate_python(r) for r in result.rows], installed=True, scheduled=scheduled
+        items=[LIFECYCLE_POLICY_ADAPTER.validate_python(r) for r in result.rows], installed=True, schedule=await _schedule(db)
     )
 
 
-async def _ensure_archive(db: Core, conn: Conn, source: sql.Identifier, archive: TableName) -> None:
-    db.require(DDL)
-    await conn.execute(lifecycle_sql.create_archive(db.qualified(archive), source))
-    db.invalidate()
+async def _require_expiry_column(db: Core, conn: Conn, table: TableMeta, expiry: RowAgeInput | RowDeadlineInput) -> None:
+    column = table.columns.get(expiry.column)
+    if column is None:
+        if not (isinstance(expiry, RowAgeInput) and expiry.add_column):
+            raise InvalidRequest(f'column "{expiry.column}" does not exist on {table.label}; an age expiry can add it with add_column=true')
+        db.require(DDL)
+        await conn.execute(lifecycle_sql.add_expiry_column(table.ident, expiry.column))
+        db.invalidate()
+    elif column.regtype not in _TIME_TYPES:
+        raise InvalidRequest(f'column "{expiry.column}" is {column.regtype}; row_ttl needs a timestamp or date column')
+
+
+async def _archive_table(db: Core, conn: Conn, table: TableMeta, action: DeleteRows | ArchiveRowsInput) -> TableName | None:
+    match action:
+        case DeleteRows():
+            return None
+        case ArchiveRowsInput():
+            archive = ".".join(db.split(action.table or f"{table.schema_name}.{table.name}_archive"))
+            db.require(DDL)
+            await conn.execute(lifecycle_sql.create_archive(db.qualified(archive), table.ident))
+            db.invalidate()
+            return archive
+        case _:
+            assert_never(action)
 
 
 @op(LifecycleRowTtl, response=RowTtlPolicy, perm=ADMIN_WRITE, hint=OperationHint.DESTRUCTIVE)
 async def row_ttl(db: Core, req: LifecycleRowTtl) -> RowTtlPolicy:
     await _require_installed(db)
     async with db.tx() as conn:
-        meta = await db.table(conn, req.input.table)
-        if req.input.column not in meta.columns:
-            if not req.input.add_column:
-                raise InvalidRequest(f'column "{req.input.column}" does not exist on {meta.label}; set add_column=true to create it')
-            if req.input.ttl is None:
-                raise InvalidRequest("add_column needs a ttl: the new column defaults to now() and rows expire ttl later")
-            db.require(DDL)
-            await conn.execute(lifecycle_sql.add_expiry_column(meta.ident, req.input.column))
-            db.invalidate()
-        elif meta.columns[req.input.column].regtype not in _TIME_TYPES:
-            raise InvalidRequest(
-                f'column "{req.input.column}" is {meta.columns[req.input.column].regtype}; row_ttl needs a timestamp or date column'
-            )
-        archive = None
-        if req.input.action == LifecycleAction.ARCHIVE:
-            archive = ".".join(db.split(req.input.archive_table or f"{meta.schema_name}.{meta.name}_archive"))
-            await _ensure_archive(db, conn, meta.ident, archive)
-        row = await (
-            await conn.execute(
-                Statement.LIFECYCLE_UPSERT.text,
-                LifecyclePolicyWrite.model_validate(
-                    req.input.model_dump()
-                    | {"kind": LifecycleKind.ROW_TTL, "schema_name": meta.schema_name, "table_name": meta.name, "archive_table": archive}
-                ).model_dump(),
-            )
-        ).fetchone()
+        table = await db.table(conn, req.input.table)
+        await _require_expiry_column(db, conn, table, req.input.expiry)
+        archive = await _archive_table(db, conn, table, req.input.action)
+        upsert = lifecycle_sql.upsert_row_ttl(table, req.input, archive)
+        row = await (await conn.execute(upsert.statement, upsert.parameters)).fetchone()
     return RowTtlPolicy.model_validate(row)
+
+
+async def _expiry_time(conn: Conn, expiry: ExpiresAt | ExpiresIn) -> EventDateTime:
+    match expiry:
+        case ExpiresAt():
+            return expiry.time
+        case ExpiresIn():
+            row = await (await conn.execute(Statement.LIFECYCLE_EXPIRY_TIME.text, [expiry.interval])).fetchone()
+            return _EXPIRY_TIME.validate_python(row["at"] if row else None)
+        case _:
+            assert_never(expiry)
 
 
 @op(LifecycleTableExpiry, response=TableExpiryPolicy, perm=ADMIN_WRITE, hint=OperationHint.DESTRUCTIVE)
 async def table_expiry(db: Core, req: LifecycleTableExpiry) -> TableExpiryPolicy:
     await _require_installed(db)
     async with db.tx() as conn:
-        meta = await db.table(conn, req.input.table)
-        if req.input.expires_in is not None:
-            r = await (await conn.execute(Statement.LIFECYCLE_EXPIRY_TIME.text, [req.input.expires_in])).fetchone()
-            expires_at = r["at"] if r else None
-        else:
-            expires_at = req.input.expires_at
-        row = await (
-            await conn.execute(
-                Statement.LIFECYCLE_UPSERT.text,
-                LifecyclePolicyWrite.model_validate(
-                    req.input.model_dump()
-                    | {
-                        "kind": LifecycleKind.TABLE_EXPIRY,
-                        "schema_name": meta.schema_name,
-                        "table_name": meta.name,
-                        "expires_at": expires_at,
-                    }
-                ).model_dump(),
-            )
-        ).fetchone()
+        table = await db.table(conn, req.input.table)
+        upsert = lifecycle_sql.upsert_table_expiry(table, req.input, await _expiry_time(conn, req.input.expiry))
+        row = await (await conn.execute(upsert.statement, upsert.parameters)).fetchone()
     return TableExpiryPolicy.model_validate(row)
 
 
 @op(LifecyclePreview, response=Count, perm=ADMIN)
 async def preview(db: Core, req: LifecyclePreview) -> Count:
-    p = await _policy(db, req.input.policy_id)
-    if not p.enabled:
+    policy = await _policy(db, req.input.policy_id)
+    if not policy.enabled:
         return Count(count=0)
     async with db.tx(read_only=True, rollback=True) as conn:
-        if p.kind == LifecycleKind.TABLE_EXPIRY:
-            row = await (await conn.execute(Statement.LIFECYCLE_PREVIEW_EXPIRY.text, [p.expires_at])).fetchone()
-            return Count.model_validate(row)
-        prepared = lifecycle_sql.preview(p)
-        row = await (await conn.execute(prepared.statement, prepared.parameters)).fetchone()
-        return Count.model_validate(row)
+        match policy:
+            case TableExpiryPolicy():
+                row = await (await conn.execute(Statement.LIFECYCLE_PREVIEW_EXPIRY.text, [policy.expires_at])).fetchone()
+            case RowTtlPolicy():
+                prepared = lifecycle_sql.preview(policy)
+                row = await (await conn.execute(prepared.statement, prepared.parameters)).fetchone()
+            case _:
+                assert_never(policy)
+    return Count.model_validate(row)
 
 
 @op(LifecycleRemove, response=Done, perm=ADMIN_WRITE, hint=OperationHint.DESTRUCTIVE)
@@ -191,9 +196,15 @@ async def remove(db: Core, req: LifecycleRemove) -> Done:
 @op(LifecycleRun, response=LifecycleRunReport, perm=ADMIN_WRITE, hint=OperationHint.DESTRUCTIVE)
 async def run(db: Core, req: LifecycleRun) -> LifecycleRunReport:
     await _require_installed(db)
-    if req.input.policy_id is not None:
-        await _policy(db, req.input.policy_id)
-    result = await db.read(Statement.LIFECYCLE_RUN.text, [req.input.policy_id])
+    policy_id: LifecyclePolicyId | None
+    match req.input.target:
+        case AllPolicies():
+            policy_id = None
+        case OnePolicy(policy_id=policy_id):
+            await _policy(db, policy_id)
+        case _:
+            assert_never(req.input.target)
+    result = await db.read(Statement.LIFECYCLE_RUN.text, [policy_id])
     db.invalidate()
     return LifecycleRunReport(items=[LifecycleRunOutcome.model_validate(r) for r in result.rows])
 
@@ -213,10 +224,14 @@ async def schedule(db: Core, req: LifecycleSchedule) -> Done:
     if not await _has_cron(db):
         raise NotFound("pg_cron is not installed; the in-process sweeper (PGFACADE_LIFECYCLE_SWEEP_S) still runs")
     async with db.tx() as conn:
-        if req.input.cron is None:
-            existing = await (await conn.execute(Statement.LIFECYCLE_CRON.text)).fetchone()
-            if existing:
-                await conn.execute(Statement.LIFECYCLE_UNSCHEDULE.text, [CRON_JOB])
-            return Done(status="UNSCHEDULED")
-        await conn.execute(Statement.LIFECYCLE_SCHEDULE.text, [CRON_JOB, req.input.cron, Statement.LIFECYCLE_SCHEDULED_COMMAND.text])
-    return Done(status=OperationStatus.SCHEDULED, detail={"job": CRON_JOB, "cron": req.input.cron})
+        match req.input.schedule:
+            case NoSchedule():
+                existing = await (await conn.execute(Statement.LIFECYCLE_CRON.text)).fetchone()
+                if existing:
+                    await conn.execute(Statement.LIFECYCLE_UNSCHEDULE.text, [CRON_JOB])
+                return Done(status="UNSCHEDULED")
+            case CronSchedule(expression=expression):
+                await conn.execute(Statement.LIFECYCLE_SCHEDULE.text, [CRON_JOB, expression, Statement.LIFECYCLE_SCHEDULED_COMMAND.text])
+                return Done(status=OperationStatus.SCHEDULED, detail={"job": CRON_JOB, "cron": expression})
+            case _:
+                assert_never(req.input.schedule)

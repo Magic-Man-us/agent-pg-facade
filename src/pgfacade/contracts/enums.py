@@ -383,6 +383,30 @@ class LifecycleAction(StrEnum):
 
 
 @unique
+class RowExpiryKind(StrEnum):
+    AGE = "age"
+    DEADLINE = "deadline"
+
+
+@unique
+class ExpiryTimeKind(StrEnum):
+    AT = "at"
+    IN = "in"
+
+
+@unique
+class LifecycleTargetKind(StrEnum):
+    ALL = "all"
+    POLICY = "policy"
+
+
+@unique
+class LifecycleScheduleKind(StrEnum):
+    CRON = "cron"
+    OFF = "off"
+
+
+@unique
 class DefaultExpr(StrEnum):
     NOW = "now()"
     CURRENT_TIMESTAMP = "current_timestamp"

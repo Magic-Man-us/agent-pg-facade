@@ -19,7 +19,10 @@ from pgfacade.contracts.lifecycle import (
     LIFECYCLE_POLICY_ADAPTER,
     LifecycleRowTtl,
     LifecycleRowTtlInput,
+    LifecycleRunInput,
+    LifecycleScheduleInput,
     LifecycleTableExpiryInput,
+    RowAgeInput,
 )
 from pgfacade.contracts.schema import ConstraintAdd, ViewCreateInput
 from pgfacade.contracts.types import RequestValues
@@ -93,7 +96,9 @@ async def test_lifecycle_column_creation_requires_server_and_principal_ddl(
         ),
     )
     monkeypatch.setattr(lifecycle, "_require_installed", AsyncMock())
-    response = await app.call(LifecycleRowTtl(input=LifecycleRowTtlInput(table="items", column="expires", ttl="1 day", add_column=True)))
+    response = await app.call(
+        LifecycleRowTtl(input=LifecycleRowTtlInput(table="items", expiry=RowAgeInput(column="expires", ttl="1 day", add_column=True)))
+    )
     assert isinstance(response.outcome, Failure)
     assert response.outcome.error.code is ErrorCode.FORBIDDEN
     connection.execute.assert_not_awaited()
@@ -103,7 +108,22 @@ async def test_lifecycle_column_creation_requires_server_and_principal_ddl(
     ("model", "value"),
     [
         (LifecycleTableExpiryInput, {"table": "items"}),
-        (LifecycleTableExpiryInput, {"table": "items", "expires_at": "2026-01-01T00:00:00Z", "expires_in": "1 day"}),
+        (LifecycleTableExpiryInput, {"table": "items", "expiry": {"kind": "at", "time": "2026-01-01T00:00:00Z", "interval": "1 day"}}),
+        (LifecycleTableExpiryInput, {"table": "items", "expires_in": "1 day"}),
+        (LifecycleRowTtlInput, {"table": "items", "expiry": {"kind": "deadline", "column": "expires", "ttl": "1 day"}}),
+        (LifecycleRowTtlInput, {"table": "items", "expiry": {"kind": "deadline", "column": "expires", "add_column": True}}),
+        (LifecycleRowTtlInput, {"table": "items", "expiry": {"kind": "age", "column": "created"}}),
+        (LifecycleRowTtlInput, {"table": "items", "expiry": {"column": "created", "ttl": "1 day"}}),
+        (
+            LifecycleRowTtlInput,
+            {"table": "items", "expiry": {"kind": "age", "column": "c", "ttl": "1 day"}, "action": {"kind": "delete", "table": "a"}},
+        ),
+        (LifecycleRunInput, {}),
+        (LifecycleRunInput, {"target": {"kind": "all", "policy_id": 1}}),
+        (LifecycleRunInput, {"target": {"kind": "policy"}}),
+        (LifecycleScheduleInput, {"schedule": {"kind": "off", "expression": "* * * * *"}}),
+        (LifecycleScheduleInput, {"schedule": {"kind": "cron"}}),
+        (LifecycleScheduleInput, {"cron": None}),
         (ViewCreateInput, {"name": "v", "query": "SELECT 1", "materialized": True, "replace": True}),
         (EventWatchInput, {"table": "items", "events": []}),
     ],

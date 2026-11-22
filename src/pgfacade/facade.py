@@ -19,7 +19,7 @@ from pgfacade.contracts.base import Contract, RequestContract
 from pgfacade.contracts.enums import MaintenanceKind, Operation, OperationHint, Outcome
 from pgfacade.contracts.envelopes import Failure, ResponseEnvelope, Success
 from pgfacade.contracts.events import EventWait, EventWaitInput, Notification
-from pgfacade.contracts.lifecycle import LifecycleList, LifecycleListInput, LifecycleRun, LifecycleRunInput
+from pgfacade.contracts.lifecycle import AllPolicies, LifecycleList, LifecycleListInput, LifecycleRun, LifecycleRunInput
 from pgfacade.contracts.requests import Batch, BatchResult, Request
 from pgfacade.contracts.streaming import EventStreamRequest, EventStreamResponse
 from pgfacade.infrastructure.postgres.engine import Core
@@ -74,7 +74,7 @@ class PgFacade(Core):
             if listing.outcome.status == Outcome.ERROR:
                 log.warning("Lifecycle discovery failed: %s", listing.outcome.error.code)
             elif listing.outcome.data.installed:
-                response = await self.call(LifecycleRun(input=LifecycleRunInput()), context)
+                response = await self.call(LifecycleRun(input=LifecycleRunInput(target=AllPolicies())), context)
                 if response.outcome.status == Outcome.ERROR:
                     log.warning("Lifecycle sweep failed: %s", response.outcome.error.code)
 
